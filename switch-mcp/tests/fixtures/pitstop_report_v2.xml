@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Modeled on a PitStop XML report v2 fragment posted on the Enfocus forum. -->
+<EnfocusReport>
+  <Report>
+    <PreflightResult errors="1" criticalfailures="0" noncriticalfailures="0" signoffs="0" fixes="1" warnings="1">
+      <PreflightResultEntry type="Check" level="warning">
+        <PreflightResultEntryMessage xml:lang="en-US">
+          <Message>Color or grayscale image resolution is less than 150 ppi (1x on page 1)</Message>
+          <StringContext>
+            <BaseString>%ImageType% resolution is %Comparator% %ReferenceResolution% ppi</BaseString>
+            <Const name="ActionID">1150</Const>
+            <Const name="ReferenceResolution">150</Const>
+            <Instance>
+              <Location maxX="454.8" maxY="347.4" minX="0" minY="0" page="0"/>
+            </Instance>
+          </StringContext>
+        </PreflightResultEntryMessage>
+      </PreflightResultEntry>
+      <PreflightResultEntry type="Check" level="error">
+        <PreflightResultEntryMessage xml:lang="en-US">
+          <Message>PDF is encrypted</Message>
+        </PreflightResultEntryMessage>
+      </PreflightResultEntry>
+      <PreflightResultEntry type="Fix" level="fix">
+        <PreflightResultEntryMessage xml:lang="en-US">
+          <Message>Removed white overprint (3x on pages 2, 4)</Message>
+        </PreflightResultEntryMessage>
+      </PreflightResultEntry>
+    </PreflightResult>
+  </Report>
+</EnfocusReport>

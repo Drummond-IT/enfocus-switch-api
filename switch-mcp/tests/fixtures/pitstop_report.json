@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "lang": "en-US",
+  "unit": "mm",
+  "processInfo": {"preflightProfile": "PDF/X-4", "engineFlavor": "PitStop"},
+  "generalDocInfo": {
+    "documentProperties": {"documentName": "card.pdf", "numPages": 2, "pdfVersion": {"major": 1, "minor": 6, "version": "1.6"}}
+  },
+  "preflightReport": {
+    "errorsNumber": 1, "warningsNumber": 0, "fixesNumber": 1,
+    "errors": {"preflightReportItem": [
+      {"actionID": 1200, "message": "Page size differs from 85 x 55 mm (2x on pages 1, 2)",
+       "location": [{"page": 0}, {"page": 1}]}
+    ]},
+    "fixes": {"preflightReportItem": [
+      {"actionID": 4325, "message": "PDF/X-4 : Changed default color spaces (1x on page 1)",
+       "stringContext": {"baseString": "PDF/X-4 : Changed default color spaces", "var": {}},
+       "location": [{"minX": -6.0, "minY": -6.0, "maxX": 216.0, "maxY": 303.0, "page": 0}]}
+    ]}
+  }
+}
