@@ -322,8 +322,9 @@ After changing these settings, restart Claude Desktop, or start a new Claude Cod
 | Session | One login per Claude session, reused, and logged out when Claude closes. The session token is only ever sent to `SWITCH_URL`. |
 | Network | Use `https://` in `SWITCH_URL` when Switch is on another machine and TLS is available. `check` warns about plain `http` to a remote host. For an internal certificate authority, set `SWITCH_CA_BUNDLE`; don't turn verification off. |
 | Changes to Switch | Read-only by default (see [section 7](#7-turning-on-write-access)). The GraphQL tool refuses mutations. |
-| Local files | Only `SWITCH_UPLOAD_DIRS` (and the download folder) can be read, and symlinks can't escape them. Downloads are written only to `SWITCH_DOWNLOAD_DIR`. Files over `SWITCH_MAX_FILE_MB` are refused. |
-| Hostile input | Job and flow IDs are validated before they're used in a URL or file name. XML reports are parsed with `defusedxml`, which refuses entity-expansion attacks. |
+| Local files | Only `SWITCH_UPLOAD_DIRS` (and the download folder) can be read. Symlinks can't escape them, and a file is read once, so it can't be swapped mid-check. Network paths (`\\server\share`, `//server/share`) are refused before the filesystem is touched, so Windows never connects out to them. Downloads are written only to `SWITCH_DOWNLOAD_DIR`, through a temporary file and a rename, so a planted symlink can't redirect them. |
+| Size and time limits | Local files, uploads and downloads over `SWITCH_MAX_FILE_MB` are refused. Reading a report or checking a PDF runs in the background with a 60-second limit, so one bad file can't freeze the connector. |
+| Hostile input | Job and flow IDs are validated before they're used in a URL or file name. XML reports are parsed with `defusedxml`, which refuses entity-expansion attacks. Report text is bounded: huge page ranges are ignored, and very long lines are cut before pattern matching. |
 | Logs | Diagnostics go to Claude's MCP log (stderr), without URLs that contain session keys. |
 
 **What you still need to know:**
@@ -337,6 +338,9 @@ After changing these settings, restart Claude Desktop, or start a new Claude Cod
   data-handling terms.
 - **Use least privilege in Switch.** The connector can only do what its Switch user is allowed
   to do.
+- **Prefer https.** Switch requires the password to be RSA-encrypted with a fixed, published key.
+  That hides the password itself, but anyone who captures the encrypted value on plain `http` can
+  replay it to log in. The same applies to the session token.
 
 ---
 
@@ -404,7 +408,7 @@ Set these in the config file, or as environment variables. Environment variables
 | `SWITCH_ALLOW_FLOW_CONTROL` | | `false` | `true` adds flow start/stop |
 | `SWITCH_UPLOAD_DIRS` | | *(none)* | Folders the connector may read files from (`:`-separated, `;` on Windows) |
 | `SWITCH_DOWNLOAD_DIR` | | `~/switch-mcp-downloads` | Where downloaded jobs and reports are saved |
-| `SWITCH_MAX_FILE_MB` | | `500` | Largest local file the connector will read or upload |
+| `SWITCH_MAX_FILE_MB` | | `500` | Largest file the connector will read, upload or download |
 | `SWITCH_TIMEOUT` | | `60` | Seconds to wait for Switch; raise it for large uploads |
 | `SWITCH_CA_BUNDLE` | | | CA certificate (PEM) for https with an internal certificate authority |
 | `SWITCH_VERIFY_TLS` | | `true` | `false` skips certificate checks (test servers only) |

@@ -10,9 +10,13 @@ Tools are grouped by risk:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
+import os
 import re
+import stat
+import tempfile
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -30,6 +34,7 @@ from .client import SwitchClient, SwitchError
 from .config import Settings
 from .pdf_check import check_pdf
 
+PARSE_TIMEOUT = 60  # seconds for parsing a report or checking a PDF
 READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 LOCAL_READ = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
@@ -85,7 +90,8 @@ def _describe_fields(fields: Any) -> list[dict[str, Any]]:
         ftype = str(f.get("type", "string"))
         d = {
             "id": f.get("id"), "name": f.get("name"), "type": ftype.split(":")[0],
-            "required": bool(f.get("valueIsRequired")), "default": f.get("value") or None,
+            "required": bool(f.get("valueIsRequired")),
+            "default": None if ftype.startswith("password") else (f.get("value") or None),
             "read_only": bool(f.get("readOnly")),
         }
         if options := _parse_enum(ftype):
@@ -107,9 +113,11 @@ def _build_metadata(fields: Any, values: dict[str, str] | None) -> list[dict[str
     fields = fields or []
     values = dict(values or {})
     by_key = {}
+    fields = [f for f in fields if isinstance(f, dict) and f.get("id")]
     for f in fields:
-        by_key[str(f.get("id", "")).lower()] = f
-        by_key[str(f.get("name", "")).lower()] = f
+        f.setdefault("name", f["id"])
+        by_key[str(f["id"]).lower()] = f
+        by_key[str(f["name"]).lower()] = f
     unknown = [k for k in values if k.lower() not in by_key]
     if unknown:
         known = ", ".join(str(f.get("name")) for f in fields) or "none"
@@ -124,8 +132,12 @@ def _build_metadata(fields: Any, values: dict[str, str] | None) -> list[dict[str
             problems.append(f"'{f['name']}' is required")
         if options and value and str(value) not in options:
             problems.append(f"'{f['name']}' must be one of {options}")
-        if f.get("format") and value and not re.fullmatch(f["format"], str(value)):
-            problems.append(f"'{f['name']}' must match {f['format']}")
+        if f.get("format") and value:
+            try:
+                if not re.fullmatch(f["format"], str(value)):
+                    problems.append(f"'{f['name']}' must match {f['format']}")
+            except re.error:
+                pass  # Switch's pattern syntax Python can't compile; leave the check to Switch
         if f["id"] in supplied or value:
             result.append({"id": f["id"], "name": f["name"], "value": str(value)})
     if problems:
@@ -148,18 +160,58 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
 
     mcp = MCPServer("enfocus-switch", instructions=INSTRUCTIONS, lifespan=lifespan)
 
-    def local_file(path: str, *, for_upload: bool = False) -> Path:
-        p = Path(path).expanduser().resolve()
+    def _inside(p: Path, allowed: list[Path]) -> bool:
+        return any(p == d or d in p.parents for d in allowed)
+
+    def read_local(path: str, *, for_upload: bool = False) -> tuple[Path, bytes, float]:
+        """Read a file the user allowed; returns (resolved path, content, mtime).
+
+        The file is opened once, without following a final symlink, so it can't be swapped
+        between the folder check and the read.
+        """
         allowed = list(settings.upload_dirs) + ([] if for_upload else [settings.download_dir])
         if not allowed:
             raise ToolError("No local folders are enabled. Set SWITCH_UPLOAD_DIRS to allow file access.")
-        if not any(p == d or d in p.parents for d in allowed):
+        raw = str(path).strip()
+        # Network paths are refused before touching the filesystem: on Windows even resolving
+        # \\host\share makes an SMB connection that can leak the user's login hash.
+        # (Any two leading slashes of either kind, which also covers \\?\UNC\ and //?/ forms.)
+        if (len(raw) >= 2 and raw[0] in "\\/" and raw[1] in "\\/") or "\x00" in raw:
+            raise ToolError("Network paths (\\\\server\\share or //server/share) are not allowed.")
+        p = Path(raw).expanduser().resolve()
+        if not _inside(p, allowed):
             raise ToolError(f"{p} is outside the allowed folders: {', '.join(map(str, allowed))}.")
-        if not p.is_file():
-            raise ToolError(f"File not found: {p}")
-        if p.stat().st_size > max_bytes:
+        try:
+            fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+        except FileNotFoundError as exc:
+            raise ToolError(f"File not found: {p}") from exc
+        except OSError as exc:
+            raise ToolError(f"Can't open {p}: {exc.strerror}") from exc
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise ToolError(f"Not a regular file: {p}")
+        with os.fdopen(fd, "rb") as fh:
+            if st.st_size > max_bytes:
+                raise ToolError(f"{p.name} is larger than SWITCH_MAX_FILE_MB ({settings.max_file_mb} MB).")
+            data = fh.read(max_bytes + 1)
+        if len(data) > max_bytes:
             raise ToolError(f"{p.name} is larger than SWITCH_MAX_FILE_MB ({settings.max_file_mb} MB).")
-        return p
+        return p, data, st.st_mtime
+
+    def save_download(name: str, data: bytes) -> Path:
+        """Write into the download folder via a temp file + rename (never through a planted symlink)."""
+        settings.download_dir.mkdir(parents=True, exist_ok=True)
+        target = settings.download_dir / name
+        fd, tmp = tempfile.mkstemp(dir=settings.download_dir, prefix=".download-", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, target)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return target
 
     async def call(coro: Any) -> Any:
         if config_errors:
@@ -172,8 +224,12 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
             return await coro
         except SwitchError as exc:
             raise ToolError(f"Switch: {exc}") from exc
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             raise ToolError(f"Can't reach Switch at {settings.url}: {exc.__class__.__name__}: {exc}") from exc
+        except OSError as exc:
+            raise ToolError(f"File error: {exc.strerror or exc}") from exc
+        except (ValueError, re.error) as exc:
+            raise ToolError(f"Unexpected data from Switch: {exc}") from exc
 
     async def require_job(job_id: str) -> dict[str, Any]:
         job = await call(switch.get_job(job_id))
@@ -206,6 +262,13 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
         except Exception as exc:  # pypdf raises many types for damaged files
             raise ToolError(f"Could not read the report: {exc}") from exc
         return preflight.analyze(parsed), parsed.source_format
+
+    async def analyze_report(content: bytes) -> tuple[dict[str, Any], str]:
+        """Parse off the event loop, with a time limit, so a hostile report can't stall other tools."""
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(report_to_analysis, content, ""), timeout=PARSE_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise ToolError(f"Reading the report took longer than {PARSE_TIMEOUT} seconds; gave up.") from exc
 
     # ------------------------------------------------------------- status
 
@@ -324,7 +387,8 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
         conditions: list[dict[str, Any]] = [{"status": {"is": "alert"}}]
         if flow_name:
             conditions.append({"flowName": {"contains": flow_name}})
-        data = await call(switch.list_jobs(filter_query={"and": conditions}, sort="onAlertSince", limit=limit))
+        data = await call(switch.list_jobs(filter_query={"and": conditions}, sort="onAlertSince",
+                                           limit=max(1, min(limit, 500))))
         jobs = [_job_summary(j) for j in data.get("data") or []]
         return {"count": len(jobs), "jobs": jobs}
 
@@ -352,12 +416,12 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
     async def download_job(job_id: str) -> dict[str, Any]:
         """Download a job's file (or zipped job folder) into the connector's download folder."""
         job = await require_job(job_id)
-        name = re.sub(r"[^\w.\- ]", "_", Path(job.get("name") or job_id).name).strip(". ") or "job"
+        name = re.sub(r"[^\w.\- ]", "_", Path(job.get("name") or job_id).name).strip(". ")[:150] or "job"
         if not job.get("isFile", True) and not name.endswith(".zip"):
             name += ".zip"
         settings.download_dir.mkdir(parents=True, exist_ok=True)
         target = settings.download_dir / f"{job_id}_{name}"
-        size = await call(switch.download_job_to(job_id, target))
+        size = await call(switch.download_job_to(job_id, target, max_bytes))
         return {"saved_to": str(target), "bytes": size}
 
     # ---------------------------------------------------------- preflight
@@ -372,12 +436,11 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
         who owns each fix, and a ready-to-send write-up for the chosen audience.
         """
         job = await require_job(job_id)
-        resp = await call(switch.download_report(job_id))
-        analysis, fmt = report_to_analysis(resp.content, resp.headers.get("content-type", ""))
-        settings.download_dir.mkdir(parents=True, exist_ok=True)
-        ext = ".pdf" if fmt == "pdf-text" else ".xml" if fmt.startswith("pitstop") else ".txt"
-        saved = settings.download_dir / f"{job_id}_report{ext}"
-        saved.write_bytes(resp.content)
+        content = await call(switch.download_report(job_id, max_bytes))
+        analysis, fmt = await analyze_report(content)
+        ext = ".pdf" if fmt == "pdf-text" else ".json" if fmt == "pitstop-json" else \
+            ".xml" if fmt.startswith("pitstop") else ".txt"
+        saved = save_download(f"{job_id}_report{ext}", content)
         analysis["report_saved_to"] = str(saved)
         if fmt == "pdf-text":
             analysis["note"] = ("Report was a PDF; findings were read from its text and may be less precise. "
@@ -398,11 +461,10 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
         `report_file` (a .xml/.txt/.pdf report inside an allowed folder).
         """
         if report_file:
-            path = local_file(report_file)
-            content = path.read_bytes()
-            analysis, _ = report_to_analysis(content, "application/pdf" if path.suffix.lower() == ".pdf" else "")
+            _, content, _ = read_local(report_file)
+            analysis, _ = await analyze_report(content)
         elif report:
-            analysis, _ = report_to_analysis(report.encode("utf-8"), "")
+            analysis, _ = await analyze_report(report.encode("utf-8"))
         else:
             raise ToolError("Provide report text or report_file.")
         analysis["write_up"] = preflight.render(analysis, audience, job_name)
@@ -421,9 +483,14 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
         Give the ordered trim size in inches to catch wrong-size files. This is an intake check,
         not a full PitStop preflight.
         """
-        path = local_file(file_path)
+        path, data, _ = read_local(file_path)
         try:
-            result = check_pdf(path, trim_width_in, trim_height_in, required_bleed_in)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(check_pdf, data, trim_width_in, trim_height_in, required_bleed_in, name=path.name),
+                timeout=PARSE_TIMEOUT,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ToolError(f"Checking {path.name} took longer than {PARSE_TIMEOUT} seconds; gave up.") from exc
         except Exception as exc:  # pypdf raises many types for damaged files
             raise ToolError(f"Could not read {path.name} as a PDF: {exc}") from exc
         parsed = preflight.ParsedReport(
@@ -503,12 +570,12 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
             metadata maps field name (or id) to value; see list_submit_points for the fields.
             """
             sp = await find_submit_point(submit_point)
-            path = local_file(file_path, for_upload=True)
+            path, data, mtime = read_local(file_path, for_upload=True)
             accepted = [t.lower().lstrip(".") for t in (sp.get("acceptFileTypes") or [])]
             if accepted and path.suffix.lower().lstrip(".") not in accepted:
                 raise ToolError(f"{sp.get('name')} only accepts: {', '.join(accepted)}")
             md = _build_metadata(sp.get("metadata"), metadata)
-            result = await call(switch.submit_job(sp["flowId"], sp["objectId"], path, job_name, md))
+            result = await call(switch.submit_job(sp["flowId"], sp["objectId"], path.name, data, job_name, md, mtime))
             return {"job_id": result.get("jobId"), "submitted_to": sp.get("name"), "flow": sp.get("flowName")}
 
         @mcp.tool(annotations=RISKY)
@@ -545,8 +612,8 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
             job = await require_job(job_id)
             if not job.get("allowReplacing"):
                 raise ToolError("This checkpoint does not allow replacing the job.")
-            path = local_file(file_path, for_upload=True)
-            await call(switch.replace_job(job_id, path, job.get("updated")))
+            path, data, _ = read_local(file_path, for_upload=True)
+            await call(switch.replace_job(job_id, path.name, data, job.get("updated")))
             return {"job": job.get("name"), "replaced_with": path.name}
 
         @mcp.tool(annotations=WRITE)

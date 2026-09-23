@@ -59,7 +59,7 @@ CATEGORIES: tuple[IssueCategory, ...] = (
     IssueCategory(
         key="rgb_color",
         title="RGB color (screen colors)",
-        patterns=(r"\bRGB\b", r"DeviceRGB", r"color ?space.*(not|isn't).*CMYK", r"Lab color"),
+        patterns=(r"\bRGB\b", r"DeviceRGB", r"color ?space.{0,60}(not|isn't).{0,60}CMYK", r"Lab color"),
         customer=(
             "Some colors in your file are set up for screens (RGB) rather than printing ink (CMYK). "
             "We convert them for you, but bright blues, greens and oranges may look a little duller "
@@ -79,8 +79,8 @@ CATEGORIES: tuple[IssueCategory, ...] = (
     IssueCategory(
         key="fonts_not_embedded",
         title="Missing fonts",
-        patterns=(r"font.*not (embedded|included)", r"not embedded", r"missing font", r"font.*missing",
-                  r"Type ?3 font", r"font.*subset"),
+        patterns=(r"font.{0,60}not (embedded|included)", r"not embedded", r"missing font", r"font.{0,60}missing",
+                  r"Type ?3 font", r"font.{0,60}subset"),
         customer=(
             "A font (typeface) used in your file wasn't included when the PDF was saved. That can "
             "make text print in the wrong typeface or with odd characters. Please re-export the PDF "
@@ -192,7 +192,7 @@ CATEGORIES: tuple[IssueCategory, ...] = (
     IssueCategory(
         key="thin_lines",
         title="Very thin lines",
-        patterns=(r"line ?width", r"hairline", r"thin line", r"stroke.*(width|thin)", r"line weight"),
+        patterns=(r"line ?width", r"hairline", r"thin line", r"stroke.{0,60}(width|thin)", r"line weight"),
         customer=(
             "Some lines in your artwork are so thin they may not show up or may print broken. We can "
             "thicken them slightly, or you can adjust them in your design."
@@ -205,7 +205,7 @@ CATEGORIES: tuple[IssueCategory, ...] = (
     IssueCategory(
         key="small_text",
         title="Very small text",
-        patterns=(r"text size", r"font size", r"point size", r"small text", r"text.*smaller than"),
+        patterns=(r"text size", r"font size", r"point size", r"small text", r"text.{0,60}smaller than"),
         customer=(
             "Some text is very small and may be hard to read or print unclearly, especially if it's "
             "light-colored or on a dark background. Consider making it larger."
@@ -230,7 +230,7 @@ CATEGORIES: tuple[IssueCategory, ...] = (
     IssueCategory(
         key="registration_black",
         title="Registration color or rich black text",
-        patterns=(r"registration", r"rich black", r"4[- ]colou?r black", r"black.*(CMY|process)"),
+        patterns=(r"registration", r"rich black", r"4[- ]colou?r black", r"black.{0,60}(CMY|process)"),
         customer=(
             "Some items use a special 'all inks' black that's meant only for printer's marks, or "
             "small text uses four inks. That can make text look blurry. We'll correct it."
@@ -332,6 +332,7 @@ GENERIC = IssueCategory(
 
 
 def categorize(text: str) -> IssueCategory:
+    text = text[:500]  # untrusted report text: keep matching time bounded
     for category in CATEGORIES:
         if category.matches(text):
             return category

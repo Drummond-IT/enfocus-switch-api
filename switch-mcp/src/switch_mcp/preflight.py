@@ -40,7 +40,14 @@ SEVERITY_NAMES = {
 }
 
 # "(3x on pages 1, 2)" / "(1x on page 1)" at the end of PitStop messages.
-_OCCURRENCES = re.compile(r"\s*\((\d+)\s*x\b[^()\d]*([\d,\s\-]*)\)\s*$", re.IGNORECASE)
+_OCCURRENCES = re.compile(r"\((\d+)\s*x\b[^()\d]*([\d,\s\-]*)\)\s*$", re.IGNORECASE)
+
+# Reports are untrusted input: bound everything that scales with their content.
+MAX_MESSAGE_CHARS = 500
+MAX_PAGES = 10_000
+MAX_RANGE = 10_000
+MAX_OCCURRENCES = 10_000_000
+MAX_FINDINGS = 5_000
 
 
 @dataclass
@@ -68,25 +75,33 @@ def _text(el: ET.Element | None) -> str:
 
 def _int_list(values: str) -> list[int]:
     pages: list[int] = []
-    for part in re.split(r"[,\s;]+|\band\b", values):
-        if re.fullmatch(r"\d+-\d+", part):
+    for part in re.split(r"[,\s;]+|\band\b", values[:2000]):
+        if len(pages) >= MAX_PAGES:
+            break
+        if re.fullmatch(r"\d{1,7}-\d{1,7}", part):
             a, b = (int(x) for x in part.split("-"))
-            pages.extend(range(a, b + 1))
-        elif part.isdigit():
+            if a <= b and b - a <= MAX_RANGE:  # ignore absurd ranges instead of expanding them
+                pages.extend(range(a, b + 1))
+        elif part.isdigit() and len(part) <= 7:
             pages.append(int(part))
-    return pages
+    return pages[:MAX_PAGES]
 
 
 def _make_finding(severity: str, message: str, zero_based_pages: list[int], locations: int) -> Finding:
     """Build a finding, taking counts/pages from a trailing "(Nx on page P)" when present."""
-    pages = sorted({p + 1 for p in zero_based_pages})
+    pages = sorted({p + 1 for p in zero_based_pages[:MAX_PAGES]})
     occurrences = max(1, locations)
-    m = _OCCURRENCES.search(message)
+    message = " ".join(message.split())  # collapse whitespace runs
+    # The suffix is short, so only look at the end of the message (keeps matching linear).
+    tail_start = max(0, len(message) - 200)
+    m = _OCCURRENCES.search(message, tail_start)
     if m:
-        occurrences = int(m.group(1))
-        pages = sorted(set(pages) | set(_int_list(m.group(2))))
+        occurrences = min(int(m.group(1)[:9]), MAX_OCCURRENCES)
+        pages = sorted(set(pages) | set(_int_list(m.group(2))))[:MAX_PAGES]
         message = message[: m.start()].strip()
-    return Finding(severity, message, pages, occurrences)
+    if len(message) > MAX_MESSAGE_CHARS:
+        message = message[:MAX_MESSAGE_CHARS] + "…"
+    return Finding(severity, message, pages, min(occurrences, MAX_OCCURRENCES))
 
 
 # ------------------------------------------------------------------------ XML
@@ -159,7 +174,7 @@ def parse_xml_report(xml_text: str | bytes) -> ParsedReport:
             continue
         if finding:
             findings.append(finding)
-    return ParsedReport(fmt, _xml_summary(root), findings)
+    return ParsedReport(fmt, _xml_summary(root), findings[:MAX_FINDINGS])
 
 
 # ----------------------------------------------------------------------- JSON
@@ -208,7 +223,8 @@ def parse_json_report(data: dict[str, Any]) -> ParsedReport:
         "pdf_version": version.get("version") if isinstance(version, dict) else version,
         "reported_counts": {k: v for k, v in report.items() if k.endswith("Number")},
     }
-    return ParsedReport("pitstop-json", {k: v for k, v in summary.items() if v not in (None, "", {})}, findings)
+    return ParsedReport("pitstop-json", {k: v for k, v in summary.items() if v not in (None, "", {})},
+                        findings[:MAX_FINDINGS])
 
 
 # ----------------------------------------------------------------------- text
@@ -236,7 +252,7 @@ def parse_text_report(text: str) -> ParsedReport:
     findings: list[Finding] = []
     current = "warning"
     for raw in text.splitlines():
-        line = raw.strip(" \t-•*")
+        line = raw.strip(" \t-•*")[:4000]
         if not line:
             continue
         heading = _HEADING.fullmatch(line)
@@ -255,6 +271,8 @@ def parse_text_report(text: str) -> ParsedReport:
             finding.pages = _int_list(pm.group(1))
             finding.occurrences = max(finding.occurrences, len(finding.pages))
         findings.append(finding)
+        if len(findings) >= MAX_FINDINGS:
+            break
     return ParsedReport("text", {}, findings)
 
 

@@ -160,13 +160,16 @@ class Settings:
         parts = urlsplit(self.url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             errors.append(f"SWITCH_URL must look like http://host:51088 or https://host:port, got {self.url!r}.")
+        elif parts.username or parts.password:
+            errors.append("SWITCH_URL must not contain a user name or password; use SWITCH_USERNAME / SWITCH_PASSWORD.")
         elif parts.path not in ("", "/"):
             errors.append(f"SWITCH_URL must not contain a path ({parts.path!r}); use only scheme://host:port.")
         else:
             if parts.scheme == "http" and not _is_local(parts.hostname):
                 warnings.append(
-                    "SWITCH_URL uses plain http to another machine: the Switch session token travels unencrypted. "
-                    "Use https if your Switch Web Services are behind TLS."
+                    "SWITCH_URL uses plain http to another machine: the session token and the encrypted password "
+                    "(which works as-is if captured) travel unprotected. Use https if your Switch Web Services "
+                    "are behind TLS."
                 )
             if parts.scheme == "https" and not self.verify_tls and not self.ca_bundle:
                 warnings.append("TLS certificate checks are OFF (SWITCH_VERIFY_TLS=false). Prefer SWITCH_CA_BUNDLE.")

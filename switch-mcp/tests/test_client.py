@@ -53,8 +53,8 @@ async def test_route_sends_json_encoded_form_fields(client, fake):
 
 
 async def test_report_link_is_rewritten_to_configured_host(client, fake):
-    resp = await client.download_report("job-1")
-    assert resp.content.startswith(b"<?xml")
+    content = await client.download_report("job-1", max_bytes=10_000_000)
+    assert content.startswith(b"<?xml")
     fetched = fake.requests[-1]
     assert fetched.url.host == "switch.test" and fetched.url.path == "/job/report/abcjob-1"
     assert "lang" not in fetched.url.params
@@ -63,9 +63,21 @@ async def test_report_link_is_rewritten_to_configured_host(client, fake):
 async def test_submit_job_multipart(client, fake, settings):
     pdf = settings.upload_dirs[0] / "art.pdf"
     pdf.write_bytes(b"%PDF-1.4 test")
-    result = await client.submit_job("1", "3", pdf, "ORD1001.pdf", [{"id": "spMF_1", "name": "Order", "value": "1"}])
+    result = await client.submit_job("1", "3", pdf.name, pdf.read_bytes(), "ORD1001.pdf",
+                                     [{"id": "spMF_1", "name": "Order", "value": "1"}])
     assert result["jobId"] == "job-new"
     body = fake.submitted[0]["body"]
     assert fake.submitted[0]["content_type"].startswith("multipart/form-data")
     for part in (b'name="flowId"', b'name="objectId"', b'name="jobName"', b"ORD1001.pdf", b"%PDF-1.4 test"):
         assert part in body
+
+
+async def test_download_size_cap(client, fake):
+    fake.report = b"<x>" + b"a" * 5000 + b"</x>"
+    with pytest.raises(SwitchError, match="larger than"):
+        await client.download_report("job-1", max_bytes=1000)
+
+
+async def test_hostile_link_paths_stay_on_configured_host(client, fake):
+    assert client._link_path("https://evil.example//other.example/x?a=1") == "/other.example/x?a=1"
+    assert client._link_path("http://127.0.0.1:51088/job/abc") == "/job/abc"

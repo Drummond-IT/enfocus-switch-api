@@ -8,6 +8,7 @@ customer is still on the phone.
 
 from __future__ import annotations
 
+import io
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -100,16 +101,23 @@ def _walk_resources(resources: Any, fonts: dict, images: list, seen: set[int], p
 
 
 def check_pdf(
-    path: str | Path,
+    source: str | Path | bytes,
     trim_width_in: float | None = None,
     trim_height_in: float | None = None,
     required_bleed_in: float = 0.125,
     tolerance_in: float = 0.01,
+    *,
+    name: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect ``path`` and return a summary plus a list of findings."""
-    reader = PdfReader(str(path))
+    """Inspect a PDF (path or bytes) and return a summary plus a list of findings."""
+    if isinstance(source, bytes):
+        reader = PdfReader(io.BytesIO(source))
+        name = name or "document.pdf"
+    else:
+        reader = PdfReader(str(source))
+        name = name or Path(source).name
     findings: list[Finding] = []
-    summary: dict[str, Any] = {"file": Path(path).name, "pdf_version": reader.pdf_header.replace("%PDF-", "")}
+    summary: dict[str, Any] = {"file": name, "pdf_version": reader.pdf_header.replace("%PDF-", "")}
 
     if reader.is_encrypted:
         findings.append(Finding("error", "PDF is encrypted/password protected."))
@@ -185,8 +193,8 @@ def check_pdf(
 
     missing = {n: sorted(v["pages"]) for n, v in fonts.items() if not v["embedded"]}
     summary["fonts"] = len(fonts)
-    for name, font_pages in missing.items():
-        findings.append(Finding("error", f"Font not embedded: {name}.", font_pages))
+    for font_name, font_pages in missing.items():
+        findings.append(Finding("error", f"Font not embedded: {font_name}.", font_pages))
 
     rgb_pages = sorted({img["page"] for img in images if img["colorspace"] in ("/DeviceRGB", "/ICCRGB", "/CalRGB")})
     summary["images"] = len(images)

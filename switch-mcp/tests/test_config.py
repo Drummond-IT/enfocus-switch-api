@@ -65,3 +65,9 @@ def test_tls_options():
     assert s.tls_verify is False
     assert any("certificate checks are OFF" in w for w in s.validate()[1])
     assert Settings.from_env({"SWITCH_CA_BUNDLE": "/x/ca.pem"}).tls_verify == "/x/ca.pem"
+
+
+def test_url_with_credentials_is_rejected():
+    s = Settings.from_env({"SWITCH_URL": "http://admin:pw@switch:51088", "SWITCH_USERNAME": "u",
+                           "SWITCH_PASSWORD": "p"})
+    assert any("must not contain a user name or password" in e for e in s.validate()[0])

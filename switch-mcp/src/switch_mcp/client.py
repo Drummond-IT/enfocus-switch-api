@@ -9,7 +9,9 @@ import asyncio
 import base64
 import json
 import mimetypes
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -207,24 +209,25 @@ class SwitchClient:
         self,
         flow_id: str,
         object_id: str,
-        file_path: Path,
+        file_name: str,
+        data: bytes,
         job_name: str | None = None,
         metadata: list[dict[str, str]] | None = None,
+        modified: float | None = None,
     ) -> dict[str, Any]:
-        """Submit a single file to a Submit point."""
-        stat = file_path.stat()
-        mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        """Submit a single file (already read into memory) to a Submit point."""
+        mime = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
         form = {
             "flowId": str(flow_id),
             "objectId": str(object_id),
-            "jobName": job_name or file_path.name,
-            "filePath": file_path.name,
-            "origin": str(file_path),
-            "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "jobName": job_name or file_name,
+            "filePath": file_name,
             "metadata": json.dumps(metadata or []),
         }
+        if modified is not None:
+            form["modified"] = datetime.fromtimestamp(modified, timezone.utc).isoformat()
         # Bytes rather than a file handle so the body can be re-sent after a re-login.
-        files = {"file": (file_path.name, file_path.read_bytes(), mime)}
+        files = {"file": (file_name, data, mime)}
         return await self._request("POST", "/api/v1/job", data=form, files=files)
 
     # ------------------------------------------------------------------ jobs
@@ -277,10 +280,10 @@ class SwitchClient:
             "PUT", f"/api/v1/job/{safe_id(job_id, 'job id')}", params={"action": "route"}, data=form
         )
 
-    async def replace_job(self, job_id: str, file_path: Path, updated: str | None = None) -> dict[str, Any]:
-        mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    async def replace_job(self, job_id: str, file_name: str, data: bytes, updated: str | None = None) -> dict[str, Any]:
+        mime = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
         form = {"updated": updated} if updated else {}
-        files = {"file[0][file]": (file_path.name, file_path.read_bytes(), mime)}
+        files = {"file[0][file]": (file_name, data, mime)}
         return await self._request(
             "PUT", f"/api/v1/job/{safe_id(job_id, 'job id')}", params={"action": "replace"}, data=form, files=files
         )
@@ -307,38 +310,47 @@ class SwitchClient:
             raise SwitchError("Switch did not return a download link.")
         return link
 
-    async def fetch_link(self, link: str) -> httpx.Response:
-        """Download a link returned by Switch.
-
-        Switch builds links with its own idea of its address (often 127.0.0.1),
-        so only the path and query are kept and sent to the configured URL.
-        """
+    @staticmethod
+    def _link_path(link: str) -> str:
+        # Switch builds links with its own idea of its address (often 127.0.0.1), so only the
+        # path and query are kept and sent to the configured URL; the token never goes elsewhere.
         parts = urlsplit(link)
-        target = parts.path + (f"?{parts.query}" if parts.query else "")
-        return await self._request("GET", target, raw=True, add_lang=False)
+        return "/" + parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
 
-    async def download_job_to(self, job_id: str, target: Path) -> int:
-        """Stream a job (file, or zipped job folder) to ``target``; returns the byte count."""
-        link = await self._download_link(f"/api/v1/job/{safe_id(job_id, 'job id')}")
-        parts = urlsplit(link)
-        path = parts.path + (f"?{parts.query}" if parts.query else "")
-        size = 0
-        partial = target.with_name(target.name + ".part")
-        try:
-            async with self._http.stream("GET", path, headers=self._auth_headers()) as resp:
-                if resp.status_code >= 400:
-                    raise SwitchError(f"Switch returned HTTP {resp.status_code} for the download", resp.status_code)
-                with partial.open("wb") as fh:
-                    async for chunk in resp.aiter_bytes():
-                        fh.write(chunk)
-                        size += len(chunk)
-            partial.replace(target)
-        finally:
-            partial.unlink(missing_ok=True)
+    async def _stream_link(self, link: str, sink: Any, max_bytes: int) -> int:
+        """Stream a Switch download link into ``sink`` (a callable taking bytes); returns the size."""
+        path = self._link_path(link)
+        async with self._http.stream("GET", path, headers=self._auth_headers()) as resp:
+            if resp.status_code >= 400:
+                raise SwitchError(f"Switch returned HTTP {resp.status_code} for the download", resp.status_code)
+            size = 0
+            async for chunk in resp.aiter_bytes():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise SwitchError(f"Download is larger than the {max_bytes // (1024 * 1024)} MB limit "
+                                      "(SWITCH_MAX_FILE_MB).")
+                sink(chunk)
         return size
 
-    async def download_report(self, job_id: str) -> httpx.Response:
-        return await self.fetch_link(await self._download_link(f"/api/v1/job/report/{safe_id(job_id, 'job id')}"))
+    async def download_report(self, job_id: str, max_bytes: int) -> bytes:
+        """Fetch the report attached to a job (kept in memory; capped at ``max_bytes``)."""
+        link = await self._download_link(f"/api/v1/job/report/{safe_id(job_id, 'job id')}")
+        buf = bytearray()
+        await self._stream_link(link, buf.extend, max_bytes)
+        return bytes(buf)
+
+    async def download_job_to(self, job_id: str, target: Path, max_bytes: int) -> int:
+        """Stream a job (file, or zipped job folder) to ``target``; returns the byte count."""
+        link = await self._download_link(f"/api/v1/job/{safe_id(job_id, 'job id')}")
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".download-", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                size = await self._stream_link(link, fh.write, max_bytes)
+            os.replace(tmp, target)  # replaces a planted symlink rather than writing through it
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return size
 
     # -------------------------------------------------------------- messages
 
