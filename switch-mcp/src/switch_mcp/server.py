@@ -134,8 +134,10 @@ def _build_metadata(fields: Any, values: dict[str, str] | None) -> list[dict[str
 
 
 def build_server(settings: Settings | None = None, client: SwitchClient | None = None) -> MCPServer:
-    settings = settings or Settings.from_env()
+    settings = settings or Settings.load()
     switch = client or SwitchClient(settings)
+    config_errors, _ = settings.validate()
+    max_bytes = settings.max_file_mb * 1024 * 1024
 
     @asynccontextmanager
     async def lifespan(_: MCPServer) -> AsyncIterator[None]:
@@ -155,9 +157,17 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
             raise ToolError(f"{p} is outside the allowed folders: {', '.join(map(str, allowed))}.")
         if not p.is_file():
             raise ToolError(f"File not found: {p}")
+        if p.stat().st_size > max_bytes:
+            raise ToolError(f"{p.name} is larger than SWITCH_MAX_FILE_MB ({settings.max_file_mb} MB).")
         return p
 
     async def call(coro: Any) -> Any:
+        if config_errors:
+            coro.close()
+            raise ToolError(
+                "The Switch connector is not configured correctly: " + " ".join(config_errors)
+                + " Run `enfocus-switch-mcp check` for details."
+            )
         try:
             return await coro
         except SwitchError as exc:
@@ -184,12 +194,17 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
         raise ToolError(f"Submit point '{submit_point}' not found or ambiguous. Available: {names}")
 
     def report_to_analysis(content: bytes, content_type: str) -> tuple[dict[str, Any], str]:
-        if content[:5] == b"%PDF-" or "pdf" in content_type:
-            from pypdf import PdfReader
+        try:
+            if content[:5] == b"%PDF-" or "pdf" in content_type:
+                from pypdf import PdfReader
 
-            text = "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages)
-            return preflight.analyze(preflight.parse_text_report(text)), "pdf-text"
-        parsed = preflight.parse_report(content)
+                text = "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages)
+                return preflight.analyze(preflight.parse_text_report(text)), "pdf-text"
+            parsed = preflight.parse_report(content)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        except Exception as exc:  # pypdf raises many types for damaged files
+            raise ToolError(f"Could not read the report: {exc}") from exc
         return preflight.analyze(parsed), parsed.source_format
 
     # ------------------------------------------------------------- status
@@ -197,7 +212,7 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
     @mcp.tool(annotations=READ)
     async def switch_status() -> dict[str, Any]:
         """Check that the Switch server is reachable and show what this connector is allowed to do."""
-        login = await call(switch.login())
+        login = await call(switch.ensure_login())
         await call(switch.ping())
         return {
             "server": settings.url,
@@ -337,14 +352,13 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
     async def download_job(job_id: str) -> dict[str, Any]:
         """Download a job's file (or zipped job folder) into the connector's download folder."""
         job = await require_job(job_id)
-        resp = await call(switch.download_job(job_id))
-        name = Path(job.get("name") or job_id).name
+        name = re.sub(r"[^\w.\- ]", "_", Path(job.get("name") or job_id).name).strip(". ") or "job"
         if not job.get("isFile", True) and not name.endswith(".zip"):
             name += ".zip"
         settings.download_dir.mkdir(parents=True, exist_ok=True)
         target = settings.download_dir / f"{job_id}_{name}"
-        target.write_bytes(resp.content)
-        return {"saved_to": str(target), "bytes": len(resp.content)}
+        size = await call(switch.download_job_to(job_id, target))
+        return {"saved_to": str(target), "bytes": size}
 
     # ---------------------------------------------------------- preflight
 
@@ -388,7 +402,7 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
             content = path.read_bytes()
             analysis, _ = report_to_analysis(content, "application/pdf" if path.suffix.lower() == ".pdf" else "")
         elif report:
-            analysis = preflight.analyze(preflight.parse_report(report))
+            analysis, _ = report_to_analysis(report.encode("utf-8"), "")
         else:
             raise ToolError("Provide report text or report_file.")
         analysis["write_up"] = preflight.render(analysis, audience, job_name)
@@ -407,7 +421,11 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
         Give the ordered trim size in inches to catch wrong-size files. This is an intake check,
         not a full PitStop preflight.
         """
-        result = check_pdf(local_file(file_path), trim_width_in, trim_height_in, required_bleed_in)
+        path = local_file(file_path)
+        try:
+            result = check_pdf(path, trim_width_in, trim_height_in, required_bleed_in)
+        except Exception as exc:  # pypdf raises many types for damaged files
+            raise ToolError(f"Could not read {path.name} as a PDF: {exc}") from exc
         parsed = preflight.ParsedReport(
             "quick-check",
             {"file": result["summary"]["file"]},
@@ -587,9 +605,3 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
     return mcp
 
 
-def main() -> None:
-    build_server().run()
-
-
-if __name__ == "__main__":
-    main()

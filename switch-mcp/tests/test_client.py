@@ -36,7 +36,7 @@ async def test_login_and_relogin_on_expired_token(client, fake):
 async def test_bad_credentials(settings, fake):
     settings.username = "nobody"
     c = SwitchClient(settings, transport=httpx.MockTransport(fake))
-    with pytest.raises(SwitchError, match="Bad credentials"):
+    with pytest.raises(SwitchError, match="Wrong user name or password"):
         await c.list_flows()
 
 

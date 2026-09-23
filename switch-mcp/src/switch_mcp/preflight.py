@@ -21,6 +21,9 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring as safe_fromstring
+
 from .knowledge import IssueCategory, categorize
 
 Audience = Literal["customer", "csr", "prepress"]
@@ -134,7 +137,8 @@ def _xml_summary(root: ET.Element) -> dict[str, Any]:
 
 
 def parse_xml_report(xml_text: str | bytes) -> ParsedReport:
-    root = ET.fromstring(xml_text)
+    # defusedxml refuses DTD entity tricks (billion laughs, external entities) in untrusted reports.
+    root = safe_fromstring(xml_text)
     findings: list[Finding] = []
     fmt = "pitstop-xml"
     for el in root.iter():
@@ -261,6 +265,8 @@ def parse_report(content: str | bytes) -> ParsedReport:
     if stripped.startswith("<"):
         try:
             return parse_xml_report(stripped.encode("utf-8"))
+        except DefusedXmlException as exc:
+            raise ValueError(f"Refused to parse the XML report: it uses DTD/entity features ({exc}).") from exc
         except ET.ParseError:
             pass
     if stripped.startswith("{"):

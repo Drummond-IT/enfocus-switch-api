@@ -128,7 +128,7 @@ async def test_unreachable_switch_gives_friendly_error(make_server):
     def boom(request):
         raise httpx.ConnectError("refused")
 
-    s = Settings(url="http://switch.test:51088", username="demo")
+    s = Settings(url="http://switch.test:51088", username="demo", password="demo")
     server = build_server(s, SwitchClient(s, transport=httpx.MockTransport(boom)))
     r = await call(server, "list_flows")
     assert r.is_error and "Can't reach Switch" in r.content[0].text

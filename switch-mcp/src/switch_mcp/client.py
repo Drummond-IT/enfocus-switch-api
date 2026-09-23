@@ -5,9 +5,11 @@ Endpoint reference: https://www.enfocus.com/manuals/DeveloperGuide/WebServices/2
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import mimetypes
+import re
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -29,6 +31,17 @@ class SwitchError(RuntimeError):
         self.status_code = status_code
 
 
+_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
+
+
+def safe_id(value: str, what: str = "id") -> str:
+    """Reject IDs that could change a URL path or file name (``..``, ``/``, ``?`` ...)."""
+    value = str(value).strip()
+    if not _ID.fullmatch(value):
+        raise SwitchError(f"Invalid {what}: {value!r}. Expected letters, digits, '-' or '_'.")
+    return value
+
+
 def encrypt_password(password: str, public_key_pem: bytes) -> str:
     """RSA/PKCS#1 v1.5 encrypt, base64 encode and prefix with ``!@$`` as Switch requires."""
     key = serialization.load_pem_public_key(public_key_pem)
@@ -48,6 +61,9 @@ class SwitchClient:
         self._token: str | None = None
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
+        self._login_lock = asyncio.Lock()
+        # Response of the last successful /login (user name and permission flags).
+        self.login_info: dict[str, Any] = {}
 
     @property
     def _http(self) -> httpx.AsyncClient:
@@ -56,7 +72,7 @@ class SwitchClient:
             self._client = httpx.AsyncClient(
                 base_url=self.settings.url,
                 timeout=self.settings.timeout,
-                verify=self.settings.verify_tls,
+                verify=self.settings.tls_verify,
                 transport=self._transport,
             )
         return self._client
@@ -64,17 +80,34 @@ class SwitchClient:
     async def aclose(self) -> None:
         if self._client is None or self._client.is_closed:
             return
-        if self._token:
-            try:
-                await self._client.get("/logout", headers=self._auth_headers())
-            except httpx.HTTPError:
-                pass
-            self._token = None
+        async with self._login_lock:
+            await self._logout()
         await self._client.aclose()
 
     # ------------------------------------------------------------------ auth
 
+    async def ensure_login(self) -> dict[str, Any]:
+        """Log in once and reuse the session; concurrent callers share one login."""
+        async with self._login_lock:
+            if self._token is None:
+                await self._login()
+        return self.login_info
+
     async def login(self) -> dict[str, Any]:
+        """Force a fresh login (logging out the previous session first)."""
+        async with self._login_lock:
+            await self._logout()
+            return await self._login()
+
+    async def _logout(self) -> None:
+        if self._token and self._client is not None and not self._client.is_closed:
+            try:
+                await self._client.get("/logout", headers=self._auth_headers())
+            except httpx.HTTPError:
+                pass
+        self._token = None
+
+    async def _login(self) -> dict[str, Any]:
         if not self.settings.username:
             raise SwitchError("SWITCH_USERNAME is not configured.")
         body = {
@@ -88,7 +121,8 @@ class SwitchClient:
         if not data.get("success") or not data.get("token"):
             raise SwitchError(data.get("error") or "Login to Switch failed.", resp.status_code)
         self._token = data["token"]
-        return data
+        self.login_info = {k: v for k, v in data.items() if k != "token"}
+        return self.login_info
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"} if self._token else {}
@@ -102,13 +136,16 @@ class SwitchClient:
             params.setdefault("lang", self.settings.lang)
         headers = dict(kwargs.pop("headers", None) or {})
         for attempt in range(2):
-            if self._token is None:
-                await self.login()
+            await self.ensure_login()
+            token = self._token
             resp = await self._http.request(
                 method, path, params=params, headers={**headers, **self._auth_headers()}, **kwargs
             )
             if resp.status_code == 401 and attempt == 0:
-                self._token = None
+                # Session expired: drop it (unless another call already replaced it) and log in again.
+                async with self._login_lock:
+                    if self._token == token:
+                        self._token = None
                 continue
             break
         if raw:
@@ -146,17 +183,21 @@ class SwitchClient:
         if ids:
             params["ids"] = ",".join(ids)
         data = await self._request("GET", "/api/v1/flows", params=params)
-        return data if isinstance(data, list) else data.get("data", [])
+        if isinstance(data, list):
+            return data
+        if "data" in data:
+            return data["data"] or []
+        return [data] if "id" in data else []
 
     async def set_flow_state(self, flow_id: str, action: str) -> dict[str, Any]:
         if action not in ("start", "stop"):
             raise ValueError("action must be 'start' or 'stop'")
-        return await self._request("PUT", f"/api/v1/flows/{flow_id}", params={"action": action})
+        return await self._request("PUT", f"/api/v1/flows/{safe_id(flow_id, 'flow id')}", params={"action": action})
 
     # --------------------------------------------------------- submit points
 
     async def list_submit_points(self, submit_point_id: str | None = None) -> list[dict]:
-        path = "/api/v1/submitpoints" + (f"/{submit_point_id}" if submit_point_id else "")
+        path = "/api/v1/submitpoints" + (f"/{safe_id(submit_point_id, 'submit point id')}" if submit_point_id else "")
         data = await self._request("GET", path)
         if isinstance(data, dict):
             data = data.get("data", [data])
@@ -210,12 +251,12 @@ class SwitchClient:
         return await self._request("GET", "/api/v1/jobs", params=params)
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
-        data = await self.list_jobs(filter_query={"and": [{"id": {"is": job_id}}]}, limit=1)
+        data = await self.list_jobs(filter_query={"and": [{"id": {"is": safe_id(job_id, 'job id')}}]}, limit=1)
         jobs = data.get("data") or []
         return jobs[0] if jobs else None
 
     async def job_metadata(self, job_ids: list[str], readonly: bool | None = None) -> dict[str, Any]:
-        params = {"ids": ",".join(job_ids)}
+        params = {"ids": ",".join(safe_id(j, "job id") for j in job_ids)}
         if readonly is not None:
             params["readonly"] = str(readonly).lower()
         data = await self._request("GET", "/api/v1/job/metadata", params=params)
@@ -232,26 +273,29 @@ class SwitchClient:
         form = {"connections": json.dumps([str(c) for c in connection_ids]), "metadata": json.dumps(metadata or [])}
         if updated:
             form["updated"] = updated
-        return await self._request("PUT", f"/api/v1/job/{job_id}", params={"action": "route"}, data=form)
+        return await self._request(
+            "PUT", f"/api/v1/job/{safe_id(job_id, 'job id')}", params={"action": "route"}, data=form
+        )
 
     async def replace_job(self, job_id: str, file_path: Path, updated: str | None = None) -> dict[str, Any]:
         mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         form = {"updated": updated} if updated else {}
         files = {"file[0][file]": (file_path.name, file_path.read_bytes(), mime)}
         return await self._request(
-            "PUT", f"/api/v1/job/{job_id}", params={"action": "replace"}, data=form, files=files
+            "PUT", f"/api/v1/job/{safe_id(job_id, 'job id')}", params={"action": "replace"}, data=form, files=files
         )
 
     async def set_job_lock(self, job_id: str, locked: bool) -> dict[str, Any]:
         action = "lock" if locked else "unlock"
-        return await self._request("PUT", f"/api/v1/job/{job_id}", params={"action": action})
+        return await self._request("PUT", f"/api/v1/job/{safe_id(job_id, 'job id')}", params={"action": action})
 
     async def set_rush(self, processing_id: str, rush: bool) -> dict[str, Any]:
         action = "rush" if rush else "unrush"
-        return await self._request("PUT", f"/api/v1/processingjob/{processing_id}", params={"action": action})
+        path = f"/api/v1/processingjob/{safe_id(processing_id, 'processing id')}"
+        return await self._request("PUT", path, params={"action": action})
 
     async def thumbnails(self, job_ids: list[str]) -> list[dict[str, str]]:
-        data = await self._request("GET", "/api/v1/thumbnails", params={"jobIds": ",".join(job_ids)})
+        data = await self._request("GET", "/api/v1/thumbnails", params={"jobIds": ",".join(safe_id(j, "job id") for j in job_ids)})
         return data.get("data", [])
 
     # ----------------------------------------------------- downloads/reports
@@ -273,11 +317,28 @@ class SwitchClient:
         target = parts.path + (f"?{parts.query}" if parts.query else "")
         return await self._request("GET", target, raw=True, add_lang=False)
 
-    async def download_job(self, job_id: str) -> httpx.Response:
-        return await self.fetch_link(await self._download_link(f"/api/v1/job/{job_id}"))
+    async def download_job_to(self, job_id: str, target: Path) -> int:
+        """Stream a job (file, or zipped job folder) to ``target``; returns the byte count."""
+        link = await self._download_link(f"/api/v1/job/{safe_id(job_id, 'job id')}")
+        parts = urlsplit(link)
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        size = 0
+        partial = target.with_name(target.name + ".part")
+        try:
+            async with self._http.stream("GET", path, headers=self._auth_headers()) as resp:
+                if resp.status_code >= 400:
+                    raise SwitchError(f"Switch returned HTTP {resp.status_code} for the download", resp.status_code)
+                with partial.open("wb") as fh:
+                    async for chunk in resp.aiter_bytes():
+                        fh.write(chunk)
+                        size += len(chunk)
+            partial.replace(target)
+        finally:
+            partial.unlink(missing_ok=True)
+        return size
 
     async def download_report(self, job_id: str) -> httpx.Response:
-        return await self.fetch_link(await self._download_link(f"/api/v1/job/report/{job_id}"))
+        return await self.fetch_link(await self._download_link(f"/api/v1/job/report/{safe_id(job_id, 'job id')}"))
 
     # -------------------------------------------------------------- messages
 

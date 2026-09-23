@@ -1,64 +1,192 @@
-"""Runtime configuration, read from environment variables."""
+"""Runtime configuration.
+
+Settings come from, in order of precedence:
+
+1. environment variables (``SWITCH_URL`` ...), e.g. set in the MCP client config;
+2. a config file of ``KEY=value`` lines: ``--env-file PATH``, else ``SWITCH_ENV_FILE``,
+   else ``~/.config/enfocus-switch-mcp/config.env`` if it exists.
+"""
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import stat
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
+
+DEFAULT_ENV_FILE = Path.home() / ".config" / "enfocus-switch-mcp" / "config.env"
+DEFAULT_DOWNLOAD_DIR = Path.home() / "switch-mcp-downloads"
 
 
-def _bool(value: str | None, default: bool = False) -> bool:
+class ConfigError(ValueError):
+    """The configuration can't work; the message says what to fix."""
+
+
+def _bool(name: str, value: str | None, default: bool) -> bool:
     if value is None or value.strip() == "":
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    v = value.strip().lower()
+    if v in {"1", "true", "yes", "on"}:
+        return True
+    if v in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name} must be true or false, got {value!r}.")
 
 
 def _paths(value: str | None) -> list[Path]:
     if not value:
         return []
-    return [Path(p).expanduser().resolve() for p in value.split(os.pathsep) if p.strip()]
+    return [Path(p.strip()).expanduser().resolve() for p in value.split(os.pathsep) if p.strip()]
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """Parse ``KEY=value`` lines. Blank lines and ``#`` comments are ignored; values may be quoted."""
+    values: dict[str, str] = {}
+    for n, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep or not key.strip():
+            raise ConfigError(f"{path}, line {n}: expected KEY=value, got {raw!r}.")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def env_file_is_private(path: Path) -> bool:
+    """False when a POSIX config file is readable by group/others (it may hold the password)."""
+    if sys.platform == "win32":
+        return True
+    return not (path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO))
+
+
+def _is_local(host: str) -> bool:
+    if host in ("localhost", ""):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass
 class Settings:
-    """Connector settings.
-
-    Every value can be set with an environment variable of the same name
-    prefixed with ``SWITCH_`` (for example ``SWITCH_URL``).
-    """
-
     url: str = "http://127.0.0.1:51088"
     username: str = ""
-    password: str = ""
+    password: str = field(default="", repr=False)
     # Switch expects the password RSA-encrypted with Enfocus' published key.
     # Leave empty to use the key bundled with this package.
     public_key_path: str = ""
-    # Language for Switch error messages (enUS, deDE, frFR, ...).
     lang: str = "enUS"
     timeout: float = 60.0
     verify_tls: bool = True
+    ca_bundle: str = ""
     # Safety switches. Out of the box the connector can only look, not touch.
     allow_write: bool = False
     allow_flow_control: bool = False
-    # Local folders jobs may be submitted from. Empty = submission disabled.
+    # Local folders files may be read from (submit, replace, checks). Empty = none.
     upload_dirs: list[Path] = field(default_factory=list)
     # Where downloaded jobs and reports are written.
-    download_dir: Path = field(default_factory=lambda: Path("switch-downloads").resolve())
+    download_dir: Path = field(default_factory=lambda: DEFAULT_DOWNLOAD_DIR)
+    # Largest local file the connector will read or upload.
+    max_file_mb: int = 500
+    # Which config file was loaded, if any (for `check` output).
+    env_file: Path | None = None
+
+    @classmethod
+    def load(cls, env_file: str | Path | None = None, environ: dict[str, str] | None = None) -> Settings:
+        environ = dict(os.environ if environ is None else environ)
+        file_values: dict[str, str] = {}
+        path = Path(env_file).expanduser() if env_file else None
+        if path is None and environ.get("SWITCH_ENV_FILE"):
+            path = Path(environ["SWITCH_ENV_FILE"]).expanduser()
+        if path is not None and not path.is_file():
+            raise ConfigError(f"Config file not found: {path}")
+        if path is None and DEFAULT_ENV_FILE.is_file():
+            path = DEFAULT_ENV_FILE
+        if path is not None:
+            file_values = read_env_file(path)
+        settings = cls.from_env({**file_values, **environ})
+        settings.env_file = path.resolve() if path else None
+        return settings
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
         env = dict(os.environ if env is None else env)
         s = cls()
-        s.url = env.get("SWITCH_URL", s.url).rstrip("/")
-        s.username = env.get("SWITCH_USERNAME", "")
+        s.url = env.get("SWITCH_URL", s.url).strip().rstrip("/")
+        s.username = env.get("SWITCH_USERNAME", "").strip()
         s.password = env.get("SWITCH_PASSWORD", "")
-        s.public_key_path = env.get("SWITCH_PUBLIC_KEY_PATH", "")
-        s.lang = env.get("SWITCH_LANG", s.lang)
-        s.timeout = float(env.get("SWITCH_TIMEOUT", s.timeout))
-        s.verify_tls = _bool(env.get("SWITCH_VERIFY_TLS"), True)
-        s.allow_write = _bool(env.get("SWITCH_ALLOW_WRITE"), False)
-        s.allow_flow_control = _bool(env.get("SWITCH_ALLOW_FLOW_CONTROL"), False)
+        if not s.password and env.get("SWITCH_PASSWORD_FILE"):
+            pw_file = Path(env["SWITCH_PASSWORD_FILE"]).expanduser()
+            if not pw_file.is_file():
+                raise ConfigError(f"SWITCH_PASSWORD_FILE not found: {pw_file}")
+            s.password = pw_file.read_text(encoding="utf-8").rstrip("\r\n")
+        s.public_key_path = env.get("SWITCH_PUBLIC_KEY_PATH", "").strip()
+        s.lang = env.get("SWITCH_LANG", s.lang).strip() or s.lang
+        try:
+            s.timeout = float(env.get("SWITCH_TIMEOUT", s.timeout))
+            s.max_file_mb = int(env.get("SWITCH_MAX_FILE_MB", s.max_file_mb))
+        except ValueError as exc:
+            raise ConfigError(f"SWITCH_TIMEOUT / SWITCH_MAX_FILE_MB must be numbers: {exc}") from exc
+        s.verify_tls = _bool("SWITCH_VERIFY_TLS", env.get("SWITCH_VERIFY_TLS"), True)
+        s.ca_bundle = env.get("SWITCH_CA_BUNDLE", "").strip()
+        s.allow_write = _bool("SWITCH_ALLOW_WRITE", env.get("SWITCH_ALLOW_WRITE"), False)
+        s.allow_flow_control = _bool("SWITCH_ALLOW_FLOW_CONTROL", env.get("SWITCH_ALLOW_FLOW_CONTROL"), False)
         s.upload_dirs = _paths(env.get("SWITCH_UPLOAD_DIRS"))
-        if env.get("SWITCH_DOWNLOAD_DIR"):
-            s.download_dir = Path(env["SWITCH_DOWNLOAD_DIR"]).expanduser().resolve()
+        if env.get("SWITCH_DOWNLOAD_DIR", "").strip():
+            s.download_dir = Path(env["SWITCH_DOWNLOAD_DIR"].strip()).expanduser().resolve()
         return s
+
+    @property
+    def tls_verify(self) -> bool | str:
+        """Value for httpx ``verify=``."""
+        if self.ca_bundle:
+            return self.ca_bundle
+        return self.verify_tls
+
+    def validate(self) -> tuple[list[str], list[str]]:
+        """Return (errors, warnings). Errors mean the connector cannot work."""
+        errors: list[str] = []
+        warnings: list[str] = []
+        parts = urlsplit(self.url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            errors.append(f"SWITCH_URL must look like http://host:51088 or https://host:port, got {self.url!r}.")
+        elif parts.path not in ("", "/"):
+            errors.append(f"SWITCH_URL must not contain a path ({parts.path!r}); use only scheme://host:port.")
+        else:
+            if parts.scheme == "http" and not _is_local(parts.hostname):
+                warnings.append(
+                    "SWITCH_URL uses plain http to another machine: the Switch session token travels unencrypted. "
+                    "Use https if your Switch Web Services are behind TLS."
+                )
+            if parts.scheme == "https" and not self.verify_tls and not self.ca_bundle:
+                warnings.append("TLS certificate checks are OFF (SWITCH_VERIFY_TLS=false). Prefer SWITCH_CA_BUNDLE.")
+        if not self.username:
+            errors.append("SWITCH_USERNAME is not set.")
+        if not self.password:
+            errors.append("SWITCH_PASSWORD (or SWITCH_PASSWORD_FILE) is not set.")
+        if self.public_key_path and not Path(self.public_key_path).expanduser().is_file():
+            errors.append(f"SWITCH_PUBLIC_KEY_PATH not found: {self.public_key_path}")
+        if self.ca_bundle and not Path(self.ca_bundle).expanduser().is_file():
+            errors.append(f"SWITCH_CA_BUNDLE not found: {self.ca_bundle}")
+        for d in self.upload_dirs:
+            if not d.is_dir():
+                errors.append(f"SWITCH_UPLOAD_DIRS entry is not a folder: {d}")
+        if self.timeout <= 0 or self.max_file_mb <= 0:
+            errors.append("SWITCH_TIMEOUT and SWITCH_MAX_FILE_MB must be greater than 0.")
+        if self.env_file and not env_file_is_private(self.env_file):
+            warnings.append(f"{self.env_file} is readable by other users. Run: chmod 600 '{self.env_file}'")
+        if self.allow_write:
+            warnings.append("Write tools are ON (SWITCH_ALLOW_WRITE=true): the assistant can submit, route and replace jobs.")
+        if self.allow_flow_control:
+            warnings.append("Flow control is ON (SWITCH_ALLOW_FLOW_CONTROL=true): the assistant can stop flows.")
+        return errors, warnings
