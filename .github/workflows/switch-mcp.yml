@@ -1,0 +1,32 @@
+name: switch-mcp
+
+on:
+  push:
+    branches: [master]
+    paths: ["switch-mcp/**", ".github/workflows/switch-mcp.yml"]
+  pull_request:
+    paths: ["switch-mcp/**", ".github/workflows/switch-mcp.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: switch-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Lint
+        run: uv run --extra dev ruff check src tests
+      - name: Unit and end-to-end tests
+        run: uv run --extra dev pytest -q

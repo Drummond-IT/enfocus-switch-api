@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Modeled on PitStop Server XML report v3 (EnfocusReport/PreflightReport/...). -->
+<EnfocusReport>
+  <ProcessInfo>
+    <PreflightProfile>Sheetfed Offset CMYK</PreflightProfile>
+  </ProcessInfo>
+  <GeneralDocInfo>
+    <DocumentProperties>
+      <DocumentName>ORD1001_Brochure.pdf</DocumentName>
+      <NumPages>8</NumPages>
+    </DocumentProperties>
+  </GeneralDocInfo>
+  <PreflightReport>
+    <Errors>
+      <PreflightReportItem ActionID="1003">
+        <Message>Font Helvetica-Bold not embedded (2x on page 3)</Message>
+        <StringContext><BaseString>Font %FontName% not embedded</BaseString></StringContext>
+        <Location page="2" minX="10" minY="10" maxX="100" maxY="20"/>
+        <Location page="2" minX="10" minY="40" maxX="100" maxY="50"/>
+      </PreflightReportItem>
+      <PreflightReportItem ActionID="1150">
+        <Message>Color or grayscale image resolution is less than 225 ppi (4x on pages 1, 2, 5)</Message>
+        <Location page="0" minX="0" minY="0" maxX="200" maxY="300"/>
+        <Location page="1" minX="0" minY="0" maxX="200" maxY="300"/>
+        <Location page="1" minX="0" minY="0" maxX="200" maxY="300"/>
+        <Location page="4" minX="0" minY="0" maxX="200" maxY="300"/>
+      </PreflightReportItem>
+    </Errors>
+    <Warnings>
+      <PreflightReportItem ActionID="2001">
+        <Message>Bleed is less than 3 mm (1x on page 1)</Message>
+        <Location page="0" minX="0" minY="0" maxX="612" maxY="792"/>
+      </PreflightReportItem>
+    </Warnings>
+    <Fixes>
+      <PreflightReportItem ActionID="4325">
+        <Message>Converted DeviceRGB to CMYK (12x on pages 1-8)</Message>
+      </PreflightReportItem>
+    </Fixes>
+  </PreflightReport>
+</EnfocusReport>

@@ -1,0 +1,38 @@
+[project]
+name = "enfocus-switch-mcp"
+version = "0.1.0"
+description = "MCP server (AI connector) for Enfocus Switch: job tracking, checkpoint routing and plain-language preflight reports."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.0,<3",
+    "httpx>=0.27",
+    "cryptography>=42",
+    "pypdf>=5",
+    "defusedxml>=0.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.scripts]
+enfocus-switch-mcp = "switch_mcp.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/switch_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint.isort]
+known-first-party = ["switch_mcp", "fake_switch"]

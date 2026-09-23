@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+switch-downloads/
+fake-switch-public.pem
+# Real configs hold passwords; only the example belongs in git.
+*.env
+!config.env.example
