@@ -1,0 +1,10 @@
+{
+  "_comment": "Which preflight issue categories your Switch flow can fix automatically. Keys are categories from src/switch_mcp/knowledge.py. route_to = name of the checkpoint's outgoing connection that leads to the auto-fix branch; action_list = what that branch runs (for people reading the plan); needs_review = check the result on a proof. Copy to ~/.config/enfocus-switch-mcp/autofix_map.json, edit, and set SWITCH_AUTOFIX_MAP. Keys starting with _ are ignored.",
+  "rgb_color":          {"route_to": "Auto-fix", "action_list": "Convert RGB to press CMYK"},
+  "overprint":          {"route_to": "Auto-fix", "action_list": "Remove white overprint"},
+  "thin_lines":         {"route_to": "Auto-fix", "action_list": "Thicken hairlines to 0.25 pt"},
+  "registration_black": {"route_to": "Auto-fix", "action_list": "Registration and rich black text to 100K"},
+  "ink_coverage":       {"route_to": "Auto-fix", "action_list": "Limit total ink to 300%"},
+  "output_intent":      {"route_to": "Auto-fix", "action_list": "Assign house output intent"},
+  "missing_bleed":      {"route_to": "Auto-fix", "action_list": "Mirror 0.125 in bleed", "needs_review": true}
+}

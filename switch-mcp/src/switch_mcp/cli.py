@@ -32,6 +32,9 @@ def _describe(settings: Settings) -> list[str]:
         f"Flow start/stop  : {'ON' if settings.allow_flow_control else 'off'}",
         f"Upload folders   : {', '.join(map(str, settings.upload_dirs)) or '(none: file tools disabled)'}",
         f"Download folder  : {settings.download_dir}",
+        f"Auto-fix map     : {settings.autofix_map or '(not set)'}",
+        f"Pace database    : {'set (read-only queries: ' + settings.pace_queries_file + ')' if settings.pace_db_dsn else '(not set)'}",
+        f"Digest webhook   : {'set' if settings.digest_webhook_url else '(not set)'}",
     ]
 
 
@@ -60,7 +63,22 @@ async def _probe(settings: Settings) -> list[str]:
             lines.append(f"--  Message log not readable ({exc}); recent_messages/problem_summary won't work.")
     finally:
         await client.aclose()
+    if settings.pace_db_dsn:
+        lines.append(_probe_pace(settings))
     return lines
+
+
+def _probe_pace(settings: Settings) -> str:
+    from .automation.pace import PaceError, gateway_from_env
+
+    try:
+        gw = gateway_from_env(settings.pace_env())
+        gw.get_job_status("__connector_check__")  # any result (usually none) proves the query runs
+    except PaceError as exc:
+        return f"--  Pace: {exc}"
+    except Exception as exc:  # noqa: BLE001 - driver/network errors, reported plainly
+        return f"--  Pace database not reachable: {exc.__class__.__name__}: {exc}"
+    return "OK  Pace database reachable; job_status query runs (read-only)."
 
 
 def check(settings: Settings) -> int:
@@ -91,14 +109,50 @@ def check(settings: Settings) -> int:
     return 0
 
 
+def run_digest(settings: Settings, hours: int, post: bool) -> int:
+    from .automation import digest
+
+    errors, _ = settings.validate()
+    if errors:
+        print("\n".join(f"ERROR: {e}" for e in errors), file=sys.stderr)
+        return 2
+
+    async def build() -> dict:
+        client = SwitchClient(settings)
+        try:
+            return await digest.build_digest(client, hours, settings.digest_stuck_hours)
+        finally:
+            await client.aclose()
+
+    try:
+        text = digest.render_markdown(asyncio.run(build()))
+    except Exception as exc:  # noqa: BLE001 - scheduled job: report plainly and fail
+        print(f"FAILED: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(text)
+    if post:
+        if not settings.digest_webhook_url:
+            print("ERROR: --post needs DIGEST_WEBHOOK_URL.", file=sys.stderr)
+            return 2
+        try:
+            digest.post_webhook(settings.digest_webhook_url, text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"FAILED to post the digest: {exc.__class__.__name__}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="enfocus-switch-mcp",
         description="MCP server for Enfocus Switch. With no command it runs the server over stdio "
                     "(this is what Claude Desktop / Claude Code start).",
     )
-    parser.add_argument("command", nargs="?", default="serve", choices=["serve", "check"],
-                        help="serve (default): run the MCP server; check: verify config and connection")
+    parser.add_argument("command", nargs="?", default="serve", choices=["serve", "check", "digest"],
+                        help="serve (default): run the MCP server; check: verify config and connection; "
+                             "digest: print the checkpoint/error digest")
+    parser.add_argument("--post", action="store_true", help="digest: also send it to DIGEST_WEBHOOK_URL")
+    parser.add_argument("--hours", type=int, default=16, help="digest: look back this many hours for errors")
     parser.add_argument("--env-file", help="config file of KEY=value lines (overrides SWITCH_ENV_FILE)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
@@ -112,6 +166,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "check":
         raise SystemExit(check(settings))
+    if args.command == "digest":
+        raise SystemExit(run_digest(settings, args.hours, args.post))
 
     from .server import build_server
 

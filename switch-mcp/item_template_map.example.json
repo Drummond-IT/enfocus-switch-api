@@ -1,0 +1,12 @@
+{
+  "_comment": "Draft field (left) -> field name in YOUR Pace item template (right). The right-hand names are placeholders: replace them with your Pace field names. Copy to ~/.config/enfocus-switch-mcp/item_template_map.json and set PACE_ITEM_TEMPLATE_MAP. Keys starting with _ are ignored.",
+  "product_guess": "product",
+  "trim_width_in": "finishedWidth",
+  "trim_height_in": "finishedHeight",
+  "pages": "pages",
+  "front_inks": "colorsSide1",
+  "back_inks": "colorsSide2",
+  "spot_colors": "specialColors",
+  "bleed": "bleeds",
+  "binding_guess": "binding"
+}

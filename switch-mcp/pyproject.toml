@@ -1,6 +1,6 @@
 [project]
 name = "enfocus-switch-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server (AI connector) for Enfocus Switch: job tracking, checkpoint routing and plain-language preflight reports."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+# Read-only Pace database access (automation/pace.py).
+pace = ["psycopg[binary]>=3.1"]
 
 [project.scripts]
 enfocus-switch-mcp = "switch_mcp.cli:main"

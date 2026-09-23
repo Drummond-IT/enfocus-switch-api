@@ -23,6 +23,9 @@ ALL_TOOLS = {
     "jobs_needing_attention", "get_job", "get_job_thumbnail", "download_job", "explain_job_report",
     "explain_preflight_report", "quick_check_pdf", "recent_messages", "problem_summary", "graphql_query",
     "submit_job", "route_job", "replace_job", "set_job_lock", "rush_job", "set_flow_running",
+    # automations
+    "compare_file_to_ticket", "pdf_facts", "draft_item_from_pdf", "plan_autofixes", "find_job_numbers",
+    "morning_digest", "approve_proof",
 }
 
 
@@ -104,6 +107,18 @@ async def test_every_tool_end_to_end(live):
         assert (await ok("problem_summary")).structured_content["error_count"] == 2
         assert (await ok("graphql_query", {"query": "{ jobs { count } }"})).structured_content["data"]
 
+        # automations
+        ticket = (await ok("compare_file_to_ticket", {"file_path": str(pdf), "trim": "85 x 55 mm", "pages": 2,
+                                                       "colors": "4/4"})).structured_content
+        assert ticket["verdict"] in ("matches_ticket", "check_with_customer"), ticket["issues"]
+        draft = (await ok("draft_item_from_pdf", {"file_path": str(pdf)})).structured_content
+        assert draft["draft"]["product_guess"].startswith("business card")
+        assert (await ok("find_job_numbers", {"text": "Job 123456"})).structured_content["candidates"]
+        assert "Switch digest" in (await ok("morning_digest")).structured_content["markdown"]
+        assert (await ok("plan_autofixes", {"job_id": "job-1"})).structured_content["suggestion"]
+        plan = (await ok("approve_proof", {"job_id": "job-1", "approved_by": "E2E"})).structured_content
+        assert plan["dry_run"] is True
+
         sub = (await ok("submit_job", {"submit_point": "Upload PDF", "file_path": str(pdf),
                                         "metadata": {"Order number": "ORD1005", "Paper": "Matte"}})).structured_content
         assert sub["job_id"] == "job-new"
@@ -128,7 +143,8 @@ async def test_read_only_by_default_and_hostile_inputs(live):
     (tmp_path / "secret.pdf").write_bytes(b"%PDF-1.4 secret")
     async with Client(_params(env_file)) as c:
         names = {t.name for t in (await c.list_tools()).tools}
-        assert not names & {"submit_job", "route_job", "replace_job", "set_job_lock", "rush_job", "set_flow_running"}
+        assert not names & {"submit_job", "route_job", "replace_job", "set_job_lock", "rush_job", "set_flow_running",
+                            "approve_proof"}
 
         async def err(name, args):
             r = await c.call_tool(name, args)
@@ -222,3 +238,14 @@ def test_stdout_is_clean_protocol(live):
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     assert lines and all(json.loads(ln)["jsonrpc"] == "2.0" for ln in lines)
     assert "Starting" in r.stderr
+
+
+def test_digest_command(live):
+    _, env_file, *_ = live
+    r = subprocess.run([*_command(), "digest", "--env-file", str(env_file)], capture_output=True, text=True,
+                       env=_clean_env(DIGEST_STUCK_HOURS="1"), timeout=60, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "**Switch digest**" in r.stdout and "ORD1001_Brochure.pdf" in r.stdout
+    r = subprocess.run([*_command(), "digest", "--post", "--env-file", str(env_file)], capture_output=True,
+                       text=True, env=_clean_env(), timeout=60, check=False)
+    assert r.returncode == 2 and "DIGEST_WEBHOOK_URL" in r.stderr
