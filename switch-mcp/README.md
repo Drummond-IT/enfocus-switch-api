@@ -17,6 +17,9 @@ What people use it for:
 
 **It is read-only unless you turn write access on.** In read-only mode it cannot change anything in Switch.
 
+> **IT team:** the deployment guide, test plan, rollout plan, runbook, backlog and training material
+> are in [`docs/handoff/`](../docs/handoff/README.md). Start there.
+
 ---
 
 ## Contents
@@ -304,6 +307,8 @@ read-only except `approve_proof`. [`docs/ai-connector-research.md`](../docs/ai-c
 | "Morning digest" | `morning_digest` | None |
 | "Approve the proof for job X, approved by Sam" | `approve_proof` (dry run first) | `SWITCH_ALLOW_WRITE=true` |
 | "Show Pace job 123456" | `pace_job` | Pace database (below) |
+| "Is this RFQ complete? What do we still need to ask?" | `validate_job_spec` | None |
+| "Which customers send the most problem files?" | `preflight_stats` | `ANALYTICS_DB` |
 
 Ready-made prompts: *Check a customer file against the job ticket*, *Draft an estimate from a
 print file*, *Reply to a client who uploaded a file*, *Turn an RFQ email into an estimate request*.
@@ -324,8 +329,41 @@ Then set `SWITCH_AUTOFIX_MAP` to that file.
 3. Set `PACE_DB_DSN` for a **read-only** database role (ideally on a replica) and set `PACE_QUERIES_FILE`.
 4. Run `enfocus-switch-mcp check`. It should report `Pace database reachable`.
 
-The connector runs only SELECT queries, in a read-only transaction. Writes to Pace (status updates,
-notes) are not implemented yet: `approve_proof` reports those steps as **manual**, with instructions.
+The connector runs only SELECT queries, in a read-only transaction.
+
+**Pace writes (status changes and notes).** Off by default; until they're on, `approve_proof` and
+the web service report Pace steps as **manual**, with instructions. To turn them on, with your
+Pace administrator:
+1. Copy `pace_api.example.json` to `~/.config/enfocus-switch-mcp/pace_api.json`. Replace the
+   placeholder paths and bodies with the calls from your Pace API documentation.
+2. Set `PACE_API_CONFIG`, `PACE_API_URL`, `PACE_API_USERNAME` and `PACE_API_PASSWORD`.
+3. Set `PACE_ALLOWED_STATUSES` to the exact statuses automation may set. Anything else is refused.
+4. Test against a **Pace test system** first. Then set `PACE_ALLOW_WRITE=true`.
+
+Every write attempt is recorded in `AUDIT_LOG`, including refused and failed ones.
+
+**Customer rules.** Some customers have standing agreements: they accept low-res images, or they
+always use 1/16" bleed. Copy `customer_rules.example.json`, edit it, and set `CUSTOMER_RULES`.
+Pass `customer` to `explain_preflight_report` or `compare_file_to_ticket`. For
+`explain_job_report`, the customer comes from the Switch job's customer field. Accepted issues
+are then listed as accepted instead of "needs customer".
+
+**Analytics.** Set `ANALYTICS_DB` to a file path. Each explained report is recorded: time,
+customer, verdict and issue types. File contents are never recorded. Use `preflight_stats` in
+Claude, or `enfocus-switch-mcp report --days 30`.
+
+**Automation web service.** For Switch flows and the web portal (no Claude in the path), run
+`enfocus-switch-mcp service` on one server. It offers:
+- **client self-serve preflight** (`POST /preflight`)
+- **Switch event handling** (`POST /switch/events`): Pace status sync, plain-language
+  explanations, optional auto-fix routing
+- **job matching** (`POST /switch/match-job`)
+- **proof approval** (`POST /proof/approve`)
+- **RFQ checks** (`POST /rfq/validate`)
+
+Every call needs an API key, and changes are only planned (dry run) until
+`SERVICE_DRY_RUN=false`. Setup, the API and operations are in
+[`docs/handoff/`](../docs/handoff/README.md).
 
 **Morning digest.**
 - `enfocus-switch-mcp digest` prints the jobs waiting in checkpoints (flagging those stuck longer
@@ -446,6 +484,8 @@ Read-only tools (always available):
 | `find_job_numbers` | Job numbers in a file name or email (looked up in Pace when connected) |
 | `morning_digest` | Waiting and stuck jobs, stopped flows, recurring errors, as Markdown |
 | `pace_job` | Pace job ticket and status (only when the Pace database is configured) |
+| `validate_job_spec` | Is a request for quote complete? Normalized spec, missing details, problems, questions for the customer |
+| `preflight_stats` | Preflight results over time by customer and issue (only when `ANALYTICS_DB` is set) |
 
 Write tools: see [section 7](#7-turning-on-write-access).
 
@@ -478,7 +518,16 @@ Set these in the config file, or as environment variables. Environment variables
 | `PACE_DB_DSN` | | | Read-only Pace PostgreSQL connection string (needs the `[pace]` extra) |
 | `PACE_QUERIES_FILE` | with `PACE_DB_DSN` | | Your filled-in `pace_queries.example.sql` |
 | `PACE_ITEM_TEMPLATE_MAP` | | *(placeholder names)* | JSON map of draft fields → Pace item template fields |
-| `PACE_PROOF_APPROVED_STATUS` | | `Proof Approved` | Pace status `approve_proof` sets (manual step for now) |
+| `PACE_PROOF_APPROVED_STATUS` | | `Proof Approved` | Pace status `approve_proof` sets |
+| `PACE_API_CONFIG` | | | Pace API write operations (`pace_api.example.json`) |
+| `PACE_API_URL` / `PACE_API_USERNAME` / `PACE_API_PASSWORD` | with `PACE_API_CONFIG` | | Pace API address and account (https) |
+| `PACE_ALLOW_WRITE` | | `false` | `true` sends Pace writes; otherwise they are reported as manual steps |
+| `PACE_ALLOWED_STATUSES` | with `PACE_ALLOW_WRITE` | | Comma-separated statuses automation may set; all others are refused |
+| `CUSTOMER_RULES` | | | Per-customer standing agreements (`customer_rules.example.json`) |
+| `ANALYTICS_DB` | | *(off)* | SQLite file for preflight analytics |
+| `ANALYTICS_RETENTION_DAYS` | | `365` | Analytics rows older than this are deleted |
+| `AUDIT_LOG` | | *(log only)* | JSON-lines audit trail of automated changes |
+| `SERVICE_*` | | | Automation web service settings: see `config.env.example` and `docs/handoff/deployment.md` |
 | `DIGEST_WEBHOOK_URL` | | | Teams/Slack incoming webhook (https) for `digest --post` |
 | `DIGEST_STUCK_HOURS` | | `4` | Hours in a checkpoint before a job counts as stuck |
 
@@ -488,6 +537,9 @@ Set these in the config file, or as environment variables. Environment variables
 enfocus-switch-mcp                 run the MCP server (what Claude starts)
 enfocus-switch-mcp check           verify the config and the connection to Switch (and Pace, if set)
 enfocus-switch-mcp digest [--post] [--hours N]   print the digest; --post sends it to DIGEST_WEBHOOK_URL
+enfocus-switch-mcp report [--days N] [--customer C]   preflight analytics (needs ANALYTICS_DB)
+enfocus-switch-mcp service         run the automation web service (see docs/handoff/deployment.md)
+enfocus-switch-mcp service-key --name NAME --scopes a,b   create an API key for the service
 enfocus-switch-mcp --env-file F    use config file F (works with or without `check`)
 enfocus-switch-mcp --version
 ```
@@ -536,14 +588,16 @@ Code layout:
 
 | File | Purpose |
 |---|---|
-| `src/switch_mcp/cli.py` | Command line: `serve` / `check` |
+| `src/switch_mcp/cli.py` | Command line: `serve` / `check` / `digest` / `report` / `service` / `service-key` |
+| `src/switch_mcp/service.py` | Automation web service (HTTP API for Switch and the portal) |
 | `src/switch_mcp/config.py` | Settings, config file loading, validation |
 | `src/switch_mcp/client.py` | Switch Web Services REST client (login, jobs, routing, downloads...) |
 | `src/switch_mcp/server.py` | The MCP tools and prompts |
 | `src/switch_mcp/preflight.py` | PitStop report parsing, verdicts, plain-language write-ups |
 | `src/switch_mcp/knowledge.py` | Wording and fix owners per preflight issue type (edit for house policy) |
 | `src/switch_mcp/pdf_check.py` | Local PDF quick check |
-| `src/switch_mcp/automation/` | Automations: `pdf_facts`, `specs` (JobSpec), `ticket_check`, `estimate_draft`, `autofix`, `job_matching`, `pace` (gateway), `workflows` (proof approval), `digest`, `tools` (their MCP tools) |
+| `src/switch_mcp/automation/` | Automations: `pdf_facts`, `specs` (JobSpec), `ticket_check`, `estimate_draft`, `autofix`, `job_matching`, `pace` (read gateway + API writer), `workflows` (proof approval), `digest`, `customer_rules`, `analytics`, `rfq`, `audit`, `tools` (their MCP tools) |
+| `deploy/`, `Dockerfile` | Service deployment: container, systemd units, Windows service script |
 
 API reference: [Switch Web Services REST API](https://www.enfocus.com/manuals/DeveloperGuide/WebServices/24/index.html).
 Background research and roadmap: [`../docs/ai-connector-research.md`](../docs/ai-connector-research.md).

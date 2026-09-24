@@ -1,4 +1,4 @@
-# Automation web service. Install: see deploy/README.md ("Linux with systemd").
+# Automation web service. Install: see docs/handoff/deployment.md, section 3.4.
 [Unit]
 Description=Enfocus Switch automation service (Drummond)
 After=network-online.target

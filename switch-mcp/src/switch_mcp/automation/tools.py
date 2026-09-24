@@ -301,7 +301,8 @@ def register(mcp: MCPServer, ctx: Context) -> None:
         return (
             "Extract the print specs from this request for quote: product, quantity (all quantities if "
             "several), finished size, pages, colors per side (as '4/4', '4/0', ...), spot colors, stock, "
-            "finishing, binding, due date, delivery. Put 'not given' for anything missing, then list the "
-            "questions to send back to the customer. Use find_job_numbers if it references an earlier job.\n\n"
+            "finishing, binding, due date, delivery. Only use what the email says; never guess. Pass what you "
+            "found to validate_job_spec, then show its missing details, problems and questions to send back "
+            "to the customer. Use find_job_numbers if it references an earlier job.\n\n"
             f"Email:\n{email_text}"
         )

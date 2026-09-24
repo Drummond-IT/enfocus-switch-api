@@ -4,9 +4,9 @@
 #
 #   docker build -t enfocus-switch-mcp .
 #   docker run --rm -p 127.0.0.1:8765:8765 --env-file /etc/enfocus-switch-mcp/config.env \
-#     -v /etc/enfocus-switch-mcp:/config:ro -v enfocus-data:/data enfocus-switch-mcp
+#     -v /etc/enfocus-switch-mcp:/etc/enfocus-switch-mcp:ro -v enfocus-data:/data enfocus-switch-mcp
 #
-# See deploy/README.md for the full procedure.
+# See docs/handoff/deployment.md for the full procedure.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -19,11 +19,11 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install ".[pace]" \
     && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin switchmcp \
-    && mkdir -p /data /config \
+    && mkdir -p /data \
     && chown switchmcp /data
 
 # Inside the container the service must listen on all interfaces; publish the port only to
-# 127.0.0.1 or a reverse proxy on the host (see deploy/README.md).
+# 127.0.0.1 or a reverse proxy on the host (see docs/handoff/deployment.md).
 ENV SERVICE_HOST=0.0.0.0 \
     SERVICE_PORT=8765 \
     SWITCH_DOWNLOAD_DIR=/data/downloads \
