@@ -7,6 +7,7 @@ Run it with ``enfocus-switch-mcp service``. Endpoints (all JSON, all need an API
                                                        plain-language explanation, optional auto-fix route.
 * ``POST /switch/match-job`` (scope ``match_job``)     B4: find the job number in a file name / email.
 * ``POST /proof/approve``    (scope ``proof_approve``) A5: route the Switch job + update Pace.
+* ``POST /rfq/validate``     (scope ``rfq``)           C2: is a quote request complete? what to ask.
 * ``GET  /health``           (no key)                  liveness for monitoring.
 
 Safety defaults: listens on 127.0.0.1; ``SERVICE_DRY_RUN=true`` (plans changes but makes none);
@@ -39,7 +40,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from . import __version__, preflight
-from .automation import analytics, autofix, job_matching, ticket_check, workflows
+from .automation import analytics, autofix, job_matching, rfq, ticket_check, workflows
 from .automation.audit import AuditLog
 from .automation.customer_rules import CustomerRules, apply_to_analysis, customer_from_job, same_customer
 from .automation.pace import PaceError, PaceGateway, PaceWriteNotImplemented, gateway_from_env
@@ -51,7 +52,7 @@ from .pdf_check import check_pdf
 
 log = logging.getLogger("switch_mcp.service")
 
-SCOPES = ("preflight", "switch_events", "match_job", "proof_approve")
+SCOPES = ("preflight", "switch_events", "match_job", "proof_approve", "rfq")
 MAX_JSON_BYTES = 64 * 1024
 PARSE_TIMEOUT = 60
 PARALLEL_PARSES = 2
@@ -504,6 +505,16 @@ def create_app(settings: Settings, switch: SwitchClient | None = None, pace: Pac
         audit["steps"] = [f"{s['system']}:{s['action']}:{s['status']}" for s in steps]
         return out
 
+    # ---------------------------------------------------------- /rfq/validate (C2)
+
+    async def rfq_validate(request: Request, key: ApiKey, audit: dict[str, Any]) -> dict[str, Any]:
+        data = await read_json(request)
+        fields = {k: v for k, v in data.items() if k in rfq.KNOWN_FIELDS
+                  and (isinstance(v, (str, int, float)) and not isinstance(v, bool)) and len(str(v)) <= 500}
+        result = rfq.validate_rfq(fields)
+        audit.update(ready=result["ready_to_quote"], missing=result["missing"])
+        return result
+
     async def health(request: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "version": __version__})
 
@@ -520,6 +531,7 @@ def create_app(settings: Settings, switch: SwitchClient | None = None, pace: Pac
         Route("/switch/events", endpoint(state, "switch_events", switch_event), methods=["POST"]),
         Route("/switch/match-job", endpoint(state, "match_job", match_job), methods=["POST"]),
         Route("/proof/approve", endpoint(state, "proof_approve", proof_approve), methods=["POST"]),
+        Route("/rfq/validate", endpoint(state, "rfq", rfq_validate), methods=["POST"]),
     ], lifespan=lifespan)
     app.state.service = state
     return app

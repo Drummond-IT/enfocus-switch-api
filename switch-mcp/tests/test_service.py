@@ -263,3 +263,12 @@ def test_cli_service_key_writes_hashed_private_file(tmp_path, capsys):
     assert stored["portal"]["sha256"] == service.hash_key(key) and key not in keys.read_text()
     assert keys.stat().st_mode & 0o077 == 0
     assert cli.run_service_key(settings, "portal", "admin") == 2
+
+
+def test_rfq_validate_endpoint(make_app, api_keys):
+    api_keys.append(service.ApiKey("forms", service.hash_key("forms-key"), ["rfq"]))
+    with make_app() as c:
+        r = c.post("/rfq/validate", json={"product": "flyer", "quantity": 500, "trim": "8.5 x 11",
+                                          "colors": "4/4", "stock": "100lb gloss", "evil": {"x": 1}},
+                   headers={"X-API-Key": "forms-key"})
+    assert r.status_code == 200 and r.json()["ready_to_quote"] is True

@@ -14,7 +14,7 @@ from mcp.types import ToolAnnotations
 
 from ..client import SwitchClient
 from ..config import Settings
-from . import analytics, autofix, digest, estimate_draft, job_matching, ticket_check, workflows
+from . import analytics, autofix, digest, estimate_draft, job_matching, rfq, ticket_check, workflows
 from .customer_rules import CustomerRules, spec_defaults
 from .pace import PaceError, PaceGateway
 from .pdf_facts import PdfFacts, analyse_pdf
@@ -140,6 +140,36 @@ def register(mcp: MCPServer, ctx: Context) -> None:
             spec = JobSpec(trim_in=draft.trim_in, pages=draft.pages)
             result["similar_pace_jobs"] = await pace_call(pace_reader.find_similar_jobs, spec, 5)
         return result
+
+    @mcp.tool(annotations=LOCAL_READ)
+    async def validate_job_spec(
+        product: str | None = None,
+        quantity: str | None = None,
+        trim: str | None = None,
+        pages: int | None = None,
+        colors: str | None = None,
+        stock: str | None = None,
+        binding: str | None = None,
+        folding: str | None = None,
+        finishing: str | None = None,
+        due_date: str | None = None,
+        delivery: str | None = None,
+        artwork: str | None = None,
+        customer: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Check a request for quote is complete before it goes to an estimator.
+
+        Pass what the customer asked for (e.g. from an RFQ email): quantity can list several
+        ("500, 1000, 2500"), trim "8.5 x 11", colors "4/4" or "4/0", due_date as YYYY-MM-DD when known.
+        Returns the normalized spec, what's missing, production problems (e.g. saddle stitch needs a
+        multiple of 4 pages) and plain-language questions to send the customer. Nothing is priced.
+        """
+        return rfq.validate_rfq({
+            "product": product, "quantity": quantity, "trim": trim, "pages": pages, "colors": colors,
+            "stock": stock, "binding": binding, "folding": folding, "finishing": finishing,
+            "due_date": due_date, "delivery": delivery, "artwork": artwork, "customer": customer, "notes": notes,
+        })
 
     # ---------------------------------------------------------- auto-fix plan
 

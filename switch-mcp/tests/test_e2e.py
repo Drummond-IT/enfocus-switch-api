@@ -25,7 +25,7 @@ ALL_TOOLS = {
     "submit_job", "route_job", "replace_job", "set_job_lock", "rush_job", "set_flow_running",
     # automations
     "compare_file_to_ticket", "pdf_facts", "draft_item_from_pdf", "plan_autofixes", "find_job_numbers",
-    "morning_digest", "approve_proof",
+    "morning_digest", "approve_proof", "validate_job_spec",
 }
 
 
