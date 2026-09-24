@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "SERVICE_STATUS_MAP: what the automation service does when Switch reports an event.",
+    "Switch calls POST /switch/events with {\"event\": \"<name>\", \"job_id\": \"[Job.Id]\"} (optionally",
+    "\"pace_job_number\" and \"customer\"). Only events listed here are accepted.",
+    "  pace_status : Pace status to set (must also be in PACE_ALLOWED_STATUSES, and PACE_ALLOW_WRITE=true)",
+    "  note        : text for the Pace note that goes with the status change",
+    "  explain     : true = read the job's preflight report and return CSR + customer write-ups",
+    "  auto_route  : true = route to the auto-fix branch when every open issue is auto-fixable",
+    "                (also needs SERVICE_AUTO_ROUTE=true and SWITCH_AUTOFIX_MAP)",
+    "Status names below are EXAMPLES: use the exact names from your Pace system."
+  ],
+  "events": {
+    "preflight_done": {"explain": true, "auto_route": true},
+    "preflight_failed": {"pace_status": "Waiting on Customer", "note": "Preflight found problems that need the customer", "explain": true},
+    "proof_sent": {"pace_status": "Proof Sent", "note": "Proof sent to the customer"},
+    "sent_to_press": {"pace_status": "In Production", "note": "Released to press"}
+  }
+}

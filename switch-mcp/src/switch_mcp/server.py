@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import logging
 import os
 import re
@@ -34,7 +33,7 @@ from . import preflight
 from .automation import analytics
 from .automation import tools as automation_tools
 from .automation.audit import AuditLog
-from .automation.customer_rules import CustomerRules, apply_to_analysis
+from .automation.customer_rules import CustomerRules, apply_to_analysis, customer_from_job
 from .automation.pace import PaceError, PaceGateway, gateway_from_env
 from .client import SwitchClient, SwitchError
 from .config import Settings
@@ -220,12 +219,7 @@ def build_server(
             raise ToolError(f"{p.name} is larger than SWITCH_MAX_FILE_MB ({settings.max_file_mb} MB).")
         return p, data, st.st_mtime
 
-    def job_customer(job: dict[str, Any]) -> str | None:
-        """Customer name from a Switch job's custom fields (any field whose name contains 'customer')."""
-        for f in job.get("customFields") or []:
-            if "customer" in str(f.get("name", "")).lower() and str(f.get("value", "")).strip():
-                return str(f["value"]).strip()
-        return None
+    job_customer = customer_from_job
 
     def record_analysis(analysis: dict[str, Any], source: str, job_ref: str | None = None,
                         customer: str | None = None) -> None:
@@ -290,17 +284,9 @@ def build_server(
 
     def report_to_analysis(content: bytes, content_type: str) -> tuple[dict[str, Any], str]:
         try:
-            if content[:5] == b"%PDF-" or "pdf" in content_type:
-                from pypdf import PdfReader
-
-                text = "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages)
-                return preflight.analyze(preflight.parse_text_report(text)), "pdf-text"
-            parsed = preflight.parse_report(content)
+            return preflight.analyze_bytes(content, content_type)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
-        except Exception as exc:  # pypdf raises many types for damaged files
-            raise ToolError(f"Could not read the report: {exc}") from exc
-        return preflight.analyze(parsed), parsed.source_format
 
     async def analyze_report(content: bytes) -> tuple[dict[str, Any], str]:
         """Parse off the event loop, with a time limit, so a hostile report can't stall other tools."""

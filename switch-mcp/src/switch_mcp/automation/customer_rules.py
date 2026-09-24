@@ -116,5 +116,23 @@ def apply_to_analysis(analysis: dict[str, Any], rule: CustomerRule | None) -> di
     return out
 
 
+def customer_from_job(job: dict[str, Any]) -> str | None:
+    """Customer name from a Switch job's custom fields (any field whose name contains 'customer')."""
+    for f in job.get("customFields") or []:
+        if "customer" in str(f.get("name", "")).lower() and str(f.get("value", "")).strip():
+            return str(f["value"]).strip()[:200]
+    return None
+
+
+def same_customer(a: str | None, b: str | None, rules: CustomerRules | None = None) -> bool:
+    """True when two customer names refer to the same customer (exact after normalising, or via aliases)."""
+    if not a or not b:
+        return False
+    if _norm(a) == _norm(b):
+        return True
+    rule_a = rules.find(a) if rules else None
+    return rule_a is not None and rule_a is rules.find(b)
+
+
 def spec_defaults(rule: CustomerRule | None) -> dict[str, Any]:
     return dict(rule.ticket_defaults) if rule else {}

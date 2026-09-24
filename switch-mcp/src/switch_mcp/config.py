@@ -127,6 +127,17 @@ class Settings:
     pace_allow_write: bool = False
     pace_allowed_statuses: str = ""
     pace_proof_approved_status: str = "Proof Approved"
+    # Automation web service (`enfocus-switch-mcp service`; see service.py).
+    service_host: str = "127.0.0.1"
+    service_port: int = 8765
+    service_keys_file: str = ""
+    service_max_upload_mb: int = 100
+    service_dry_run: bool = True
+    service_status_map: str = ""
+    service_auto_route: bool = False
+    service_rate_limit_per_min: int = 60
+    service_tls_cert: str = ""
+    service_tls_key: str = ""
     # Digest: incoming-webhook URL (Teams/Slack) and "stuck" threshold.
     digest_webhook_url: str = field(default="", repr=False)
     digest_stuck_hours: float = 4.0
@@ -195,6 +206,20 @@ class Settings:
         s.pace_allow_write = _bool("PACE_ALLOW_WRITE", env.get("PACE_ALLOW_WRITE"), False)
         s.pace_allowed_statuses = env.get("PACE_ALLOWED_STATUSES", "").strip()
         s.pace_proof_approved_status = env.get("PACE_PROOF_APPROVED_STATUS", s.pace_proof_approved_status).strip()
+        s.service_host = env.get("SERVICE_HOST", s.service_host).strip() or s.service_host
+        s.service_keys_file = env.get("SERVICE_KEYS_FILE", "").strip()
+        s.service_status_map = env.get("SERVICE_STATUS_MAP", "").strip()
+        s.service_tls_cert = env.get("SERVICE_TLS_CERT", "").strip()
+        s.service_tls_key = env.get("SERVICE_TLS_KEY", "").strip()
+        s.service_dry_run = _bool("SERVICE_DRY_RUN", env.get("SERVICE_DRY_RUN"), True)
+        s.service_auto_route = _bool("SERVICE_AUTO_ROUTE", env.get("SERVICE_AUTO_ROUTE"), False)
+        try:
+            s.service_port = int(env.get("SERVICE_PORT", s.service_port))
+            s.service_max_upload_mb = int(env.get("SERVICE_MAX_UPLOAD_MB", s.service_max_upload_mb))
+            s.service_rate_limit_per_min = int(env.get("SERVICE_RATE_LIMIT_PER_MIN", s.service_rate_limit_per_min))
+        except ValueError as exc:
+            raise ConfigError(f"SERVICE_PORT / SERVICE_MAX_UPLOAD_MB / SERVICE_RATE_LIMIT_PER_MIN must be whole "
+                              f"numbers: {exc}") from exc
         s.digest_webhook_url = env.get("DIGEST_WEBHOOK_URL", "").strip()
         try:
             s.digest_stuck_hours = float(env.get("DIGEST_STUCK_HOURS", s.digest_stuck_hours))
@@ -215,6 +240,35 @@ class Settings:
     @property
     def pace_enabled(self) -> bool:
         return bool(self.pace_db_dsn or self.pace_api_config)
+
+    def validate_service(self) -> tuple[list[str], list[str]]:
+        """Extra checks for the automation web service. Returns (errors, warnings)."""
+        errors: list[str] = []
+        warnings: list[str] = []
+        if not self.service_keys_file:
+            errors.append("SERVICE_KEYS_FILE is not set: create one with `enfocus-switch-mcp service-key`.")
+        elif not Path(self.service_keys_file).expanduser().is_file():
+            errors.append(f"SERVICE_KEYS_FILE not found: {self.service_keys_file}")
+        for name, value in (("SERVICE_STATUS_MAP", self.service_status_map),
+                            ("SERVICE_TLS_CERT", self.service_tls_cert), ("SERVICE_TLS_KEY", self.service_tls_key)):
+            if value and not Path(value).expanduser().is_file():
+                errors.append(f"{name} not found: {value}")
+        if bool(self.service_tls_cert) != bool(self.service_tls_key):
+            errors.append("Set both SERVICE_TLS_CERT and SERVICE_TLS_KEY, or neither.")
+        if not 0 < self.service_port < 65536:
+            errors.append("SERVICE_PORT must be 1-65535.")
+        if self.service_max_upload_mb <= 0 or self.service_rate_limit_per_min <= 0:
+            errors.append("SERVICE_MAX_UPLOAD_MB and SERVICE_RATE_LIMIT_PER_MIN must be greater than 0.")
+        if not _is_local(self.service_host) and not self.service_tls_cert:
+            warnings.append(f"The service listens on {self.service_host} without TLS: put it behind a reverse "
+                            "proxy with https (or set SERVICE_TLS_CERT / SERVICE_TLS_KEY); API keys travel in "
+                            "every request.")
+        if self.service_dry_run:
+            warnings.append("SERVICE_DRY_RUN is on (default): the service plans changes but makes none.")
+        if self.service_auto_route:
+            warnings.append("SERVICE_AUTO_ROUTE is on: checkpoint jobs whose issues are all auto-fixable are routed "
+                            "to the auto-fix branch without a person.")
+        return errors, warnings
 
     @property
     def tls_verify(self) -> bool | str:

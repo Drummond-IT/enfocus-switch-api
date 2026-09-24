@@ -295,6 +295,27 @@ def parse_report(content: str | bytes) -> ParsedReport:
     return parse_text_report(content)
 
 
+def analyze_bytes(content: bytes, content_type: str = "") -> tuple[dict[str, Any], str]:
+    """Analyse a downloaded report of any supported kind (XML, JSON, text or a PDF report).
+
+    Returns (analysis, source format). Raises ValueError for anything that can't be read.
+    """
+    try:
+        if content[:5] == b"%PDF-" or "pdf" in content_type:
+            import io
+
+            from pypdf import PdfReader
+
+            text = "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages)
+            return analyze(parse_text_report(text)), "pdf-text"
+        parsed = parse_report(content)
+    except ValueError:
+        raise
+    except Exception as exc:  # pypdf raises many types for damaged files
+        raise ValueError(f"Could not read the report: {exc}") from exc
+    return analyze(parsed), parsed.source_format
+
+
 # --------------------------------------------------------------------- explain
 
 SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2, "fixed": 3, "signed_off": 4, "accepted": 5}

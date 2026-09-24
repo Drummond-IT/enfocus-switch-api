@@ -12,9 +12,10 @@ import re
 from dataclasses import dataclass
 
 DEFAULT_PATTERNS = [
-    r"\bjob\s*(?:no\.?|number|#)?\s*[:#-]?\s*(\d{4,8})\b",   # "Job 123456", "job #123456"
-    r"\bJ[-_ ]?(\d{4,8})\b",                                   # "J123456", "J-123456"
-    r"\b(ORD\d{3,8})\b",                                        # "ORD1001"
+    # "(?!\d)" rather than "\b" at the end, so "J123456_Brochure.pdf" matches ("_" is a word character).
+    r"\bjob\s*(?:no\.?|number|#)?\s*[:#-]?\s*(\d{4,8})(?!\d)",   # "Job 123456", "job #123456"
+    r"(?<![A-Za-z0-9])J[-_ ]?(\d{4,8})(?!\d)",                     # "J123456", "J-123456", "J123456_x"
+    r"(?<![A-Za-z0-9])(ORD\d{3,8})(?!\d)",                         # "ORD1001", "ORD1001_Brochure.pdf"
     r"(?:^|[\\/_\s])(\d{5,8})(?=[_\-\s.])",                    # "123456_Brochure.pdf"
 ]
 MAX_TEXT = 20_000
