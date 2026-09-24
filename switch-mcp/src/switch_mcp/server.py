@@ -30,6 +30,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import preflight
+from .automation import tools as automation_tools
+from .automation.pace import PaceError, PaceGateway, gateway_from_env
 from .client import SwitchClient, SwitchError
 from .config import Settings
 from .pdf_check import check_pdf
@@ -145,10 +147,19 @@ def _build_metadata(fields: Any, values: dict[str, str] | None) -> list[dict[str
     return result
 
 
-def build_server(settings: Settings | None = None, client: SwitchClient | None = None) -> MCPServer:
+def build_server(
+    settings: Settings | None = None,
+    client: SwitchClient | None = None,
+    pace: PaceGateway | None = None,
+) -> MCPServer:
     settings = settings or Settings.load()
     switch = client or SwitchClient(settings)
     config_errors, _ = settings.validate()
+    if pace is None and settings.pace_db_dsn and not config_errors:
+        try:
+            pace = gateway_from_env(settings.pace_env())
+        except (PaceError, OSError) as exc:
+            config_errors.append(f"Pace: {exc}")
     max_bytes = settings.max_file_mb * 1024 * 1024
 
     @asynccontextmanager
@@ -638,6 +649,11 @@ def build_server(settings: Settings | None = None, client: SwitchClient | None =
             """Start or stop a flow. Stopping a flow halts production on it."""
             result = await call(switch.set_flow_state(flow_id, "start" if running else "stop"))
             return {"flow_id": flow_id, "flow_status": result.get("flowStatus", "running" if running else "stopped")}
+
+    automation_tools.register(mcp, automation_tools.Context(
+        settings=settings, switch=switch, pace=pace, call=call, read_local=read_local,
+        require_job=require_job, analyze_report=analyze_report,
+    ))
 
     # ------------------------------------------------------------- prompts
 

@@ -83,7 +83,7 @@ Check that it worked:
 enfocus-switch-mcp --version
 ```
 
-It should print `enfocus-switch-mcp 0.1.0`. If you get "command not found", run
+It should print `enfocus-switch-mcp 0.2.0`. If you get "command not found", run
 `uv tool update-shell`, open a new terminal, and try again.
 
 **Write down the full path of the command.** Claude Desktop needs it, because it doesn't use
@@ -154,7 +154,7 @@ enfocus-switch-mcp check
 A working setup looks like this:
 
 ```
-enfocus-switch-mcp 0.1.0
+enfocus-switch-mcp 0.2.0
 Config file      : /Users/you/.config/enfocus-switch-mcp/config.env
 Switch URL       : http://switch01:51088
 Switch user      : ai-connector
@@ -163,6 +163,9 @@ Write tools      : off
 Flow start/stop  : off
 Upload folders   : (none: file tools disabled)
 Download folder  : /Users/you/switch-mcp-downloads
+Auto-fix map     : (not set)
+Pace database    : (not set)
+Digest webhook   : (not set)
 
 Connecting to http://switch01:51088 ...
 OK  Logged in to Switch as 'ai-connector'.
@@ -285,6 +288,53 @@ them in a separate file, for example `demo.env`, and connect Claude with
 `FULL_PATH --env-file /path/to/demo.env`. The fake has one job waiting in a checkpoint with a
 sample preflight report.
 
+### Automations (optional)
+
+These tools help CSRs, prepress and estimators with more than reading Switch. They are all
+read-only except `approve_proof`. [`docs/ai-connector-research.md`](../docs/ai-connector-research.md)
+(section 3) has the full design and status of each one.
+
+| Ask Claude | Tool | Setup needed |
+|---|---|---|
+| "Does `ACME.pdf` match the order: 8.5 x 11, 4/4, 2 pages?" | `compare_file_to_ticket` | None. Add Pace (below) to use `pace_job_number` |
+| "What's actually in this PDF: sizes, inks, spot colors?" | `pdf_facts` | None |
+| "Draft an estimate item from this file" | `draft_item_from_pdf` | Optional: `PACE_ITEM_TEMPLATE_MAP` |
+| "What can the auto-fix branch handle on job X?" | `plan_autofixes` | `SWITCH_AUTOFIX_MAP` |
+| "Which job is this email about?" | `find_job_numbers` | Optional: `PACE_JOB_NUMBER_PATTERNS` |
+| "Morning digest" | `morning_digest` | None |
+| "Approve the proof for job X, approved by Sam" | `approve_proof` (dry run first) | `SWITCH_ALLOW_WRITE=true` |
+| "Show Pace job 123456" | `pace_job` | Pace database (below) |
+
+Ready-made prompts: *Check a customer file against the job ticket*, *Draft an estimate from a
+print file*, *Reply to a client who uploaded a file*, *Turn an RFQ email into an estimate request*.
+If you also have the **Pace MCP** connected, these prompts tell Claude to read the job from Pace
+first.
+
+**Auto-fix map.** Copy `autofix_map.example.json` to `~/.config/enfocus-switch-mcp/autofix_map.json`
+and edit it:
+- Each key is an issue category.
+- `route_to` is the name of the checkpoint connection that leads to your auto-fix branch.
+
+Then set `SWITCH_AUTOFIX_MAP` to that file.
+
+**Pace (read-only).** Set this up together with your Pace administrator:
+1. Install the database driver: `uv tool install --reinstall './switch-mcp[pace]'`.
+2. Copy `pace_queries.example.sql` to `~/.config/enfocus-switch-mcp/pace_queries.sql` and replace
+   each `TODO` with SQL for your Pace schema. Keep the column aliases exactly as they are.
+3. Set `PACE_DB_DSN` for a **read-only** database role (ideally on a replica) and set `PACE_QUERIES_FILE`.
+4. Run `enfocus-switch-mcp check`. It should report `Pace database reachable`.
+
+The connector runs only SELECT queries, in a read-only transaction. Writes to Pace (status updates,
+notes) are not implemented yet: `approve_proof` reports those steps as **manual**, with instructions.
+
+**Morning digest.**
+- `enfocus-switch-mcp digest` prints the jobs waiting in checkpoints (flagging those stuck longer
+  than `DIGEST_STUCK_HOURS`), flows that aren't running, and recurring errors.
+- Add `--post` to send it to a Teams or Slack incoming webhook (`DIGEST_WEBHOOK_URL`).
+- To get it every morning, schedule it with cron (macOS/Linux):
+  `0 7 * * 1-5 /full/path/enfocus-switch-mcp digest --post`
+  or with Windows Task Scheduler.
+
 ---
 
 ## 7. Turning on write access
@@ -294,7 +344,7 @@ whose job includes those actions.
 
 | Setting | Adds these tools | What they do |
 |---|---|---|
-| `SWITCH_ALLOW_WRITE=true` | `submit_job`, `route_job`, `replace_job`, `set_job_lock`, `rush_job` | Submit files, approve/reject (route) checkpoint jobs, replace a job's file, lock jobs, rush jobs |
+| `SWITCH_ALLOW_WRITE=true` | `submit_job`, `route_job`, `replace_job`, `set_job_lock`, `rush_job`, `approve_proof` | Submit files, approve/reject (route) checkpoint jobs, replace a job's file, lock jobs, rush jobs, run the proof-approval workflow |
 | `SWITCH_ALLOW_FLOW_CONTROL=true` | `set_flow_running` | Start and **stop** flows |
 
 Safeguards that stay on:
@@ -389,6 +439,13 @@ Read-only tools (always available):
 | `recent_messages` | Switch message log, with filters |
 | `problem_summary` | Recurring errors and warnings grouped by flow and element |
 | `graphql_query` | Read-only Switch GraphQL query (processing jobs; statistics if Reporting is licensed) |
+| `compare_file_to_ticket` | Check a PDF against the order: size, pages, sides, inks, spot colors, bleed |
+| `pdf_facts` | Per-page trim size, bleed, process inks, RGB and spot colors of a PDF |
+| `draft_item_from_pdf` | Draft estimate item and Pace item-template payload from a PDF (never prices) |
+| `plan_autofixes` | Split a checkpoint job's issues into auto-fixable / prepress / customer, with a routing suggestion |
+| `find_job_numbers` | Job numbers in a file name or email (looked up in Pace when connected) |
+| `morning_digest` | Waiting and stuck jobs, stopped flows, recurring errors, as Markdown |
+| `pace_job` | Pace job ticket and status (only when the Pace database is configured) |
 
 Write tools: see [section 7](#7-turning-on-write-access).
 
@@ -415,12 +472,22 @@ Set these in the config file, or as environment variables. Environment variables
 | `SWITCH_LANG` | | `enUS` | Language of Switch error messages: `enUS deDE frFR esES itIT jaJA ptBR zhCN` |
 | `SWITCH_PUBLIC_KEY_PATH` | | *(bundled)* | Only if Enfocus changes the Web Services login key |
 | `SWITCH_ENV_FILE` | | `~/.config/enfocus-switch-mcp/config.env` | Where to find the config file (`--env-file` overrides) |
+| `SWITCH_AUTOFIX_MAP` | | | JSON map of issue category → auto-fix route (`autofix_map.example.json`) |
+| `SWITCH_APPROVE_CONNECTION` | | `Approve` | Checkpoint connection that means "proof approved" |
+| `PACE_JOB_NUMBER_PATTERNS` | | *(built-in)* | `;`-separated regexes, one capture group each, for job numbers |
+| `PACE_DB_DSN` | | | Read-only Pace PostgreSQL connection string (needs the `[pace]` extra) |
+| `PACE_QUERIES_FILE` | with `PACE_DB_DSN` | | Your filled-in `pace_queries.example.sql` |
+| `PACE_ITEM_TEMPLATE_MAP` | | *(placeholder names)* | JSON map of draft fields → Pace item template fields |
+| `PACE_PROOF_APPROVED_STATUS` | | `Proof Approved` | Pace status `approve_proof` sets (manual step for now) |
+| `DIGEST_WEBHOOK_URL` | | | Teams/Slack incoming webhook (https) for `digest --post` |
+| `DIGEST_STUCK_HOURS` | | `4` | Hours in a checkpoint before a job counts as stuck |
 
 ### Command line
 
 ```
 enfocus-switch-mcp                 run the MCP server (what Claude starts)
-enfocus-switch-mcp check           verify the config and the connection to Switch
+enfocus-switch-mcp check           verify the config and the connection to Switch (and Pace, if set)
+enfocus-switch-mcp digest [--post] [--hours N]   print the digest; --post sends it to DIGEST_WEBHOOK_URL
 enfocus-switch-mcp --env-file F    use config file F (works with or without `check`)
 enfocus-switch-mcp --version
 ```
@@ -476,6 +543,7 @@ Code layout:
 | `src/switch_mcp/preflight.py` | PitStop report parsing, verdicts, plain-language write-ups |
 | `src/switch_mcp/knowledge.py` | Wording and fix owners per preflight issue type (edit for house policy) |
 | `src/switch_mcp/pdf_check.py` | Local PDF quick check |
+| `src/switch_mcp/automation/` | Automations: `pdf_facts`, `specs` (JobSpec), `ticket_check`, `estimate_draft`, `autofix`, `job_matching`, `pace` (gateway), `workflows` (proof approval), `digest`, `tools` (their MCP tools) |
 
 API reference: [Switch Web Services REST API](https://www.enfocus.com/manuals/DeveloperGuide/WebServices/24/index.html).
 Background research and roadmap: [`../docs/ai-connector-research.md`](../docs/ai-connector-research.md).

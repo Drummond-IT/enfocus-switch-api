@@ -3,7 +3,7 @@ import json
 import pytest
 from mcp.client import Client
 
-WRITE_TOOLS = {"submit_job", "route_job", "replace_job", "set_job_lock", "rush_job"}
+WRITE_TOOLS = {"submit_job", "route_job", "replace_job", "set_job_lock", "rush_job", "approve_proof"}
 
 
 async def tools(server) -> set[str]:

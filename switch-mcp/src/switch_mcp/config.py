@@ -101,6 +101,25 @@ class Settings:
     # Which config file was loaded, if any (for `check` output).
     env_file: Path | None = None
 
+    # ---- automations (all optional; see docs/ai-connector-research.md) ----
+    # JSON map of preflight category -> auto-fix route (see automation/autofix.py).
+    autofix_map: str = ""
+    # Name of the checkpoint connection that means "proof approved".
+    approve_connection: str = "Approve"
+    # Regexes (";"-separated, one capture group) for job numbers in file names / emails.
+    job_number_patterns: str = ""
+    # Pace: read-only database + queries file; API settings for (future) writes.
+    pace_db_dsn: str = field(default="", repr=False)
+    pace_queries_file: str = ""
+    pace_api_url: str = ""
+    pace_api_username: str = ""
+    pace_api_password: str = field(default="", repr=False)
+    pace_item_template_map: str = ""
+    pace_proof_approved_status: str = "Proof Approved"
+    # Digest: incoming-webhook URL (Teams/Slack) and "stuck" threshold.
+    digest_webhook_url: str = field(default="", repr=False)
+    digest_stuck_hours: float = 4.0
+
     @classmethod
     def load(cls, env_file: str | Path | None = None, environ: dict[str, str] | None = None) -> Settings:
         environ = dict(os.environ if environ is None else environ)
@@ -144,7 +163,31 @@ class Settings:
         s.upload_dirs = _paths(env.get("SWITCH_UPLOAD_DIRS"))
         if env.get("SWITCH_DOWNLOAD_DIR", "").strip():
             s.download_dir = Path(env["SWITCH_DOWNLOAD_DIR"].strip()).expanduser().resolve()
+
+        s.autofix_map = env.get("SWITCH_AUTOFIX_MAP", "").strip()
+        s.approve_connection = env.get("SWITCH_APPROVE_CONNECTION", s.approve_connection).strip() or "Approve"
+        s.job_number_patterns = env.get("PACE_JOB_NUMBER_PATTERNS", "").strip()
+        s.pace_db_dsn = env.get("PACE_DB_DSN", "").strip()
+        s.pace_queries_file = env.get("PACE_QUERIES_FILE", "").strip()
+        s.pace_api_url = env.get("PACE_API_URL", "").strip()
+        s.pace_api_username = env.get("PACE_API_USERNAME", "").strip()
+        s.pace_api_password = env.get("PACE_API_PASSWORD", "")
+        s.pace_item_template_map = env.get("PACE_ITEM_TEMPLATE_MAP", "").strip()
+        s.pace_proof_approved_status = env.get("PACE_PROOF_APPROVED_STATUS", s.pace_proof_approved_status).strip()
+        s.digest_webhook_url = env.get("DIGEST_WEBHOOK_URL", "").strip()
+        try:
+            s.digest_stuck_hours = float(env.get("DIGEST_STUCK_HOURS", s.digest_stuck_hours))
+        except ValueError as exc:
+            raise ConfigError(f"DIGEST_STUCK_HOURS must be a number: {exc}") from exc
         return s
+
+    def pace_env(self) -> dict[str, str]:
+        """Pace settings in the shape automation.pace.gateway_from_env expects."""
+        return {
+            "PACE_DB_DSN": self.pace_db_dsn, "PACE_QUERIES_FILE": self.pace_queries_file,
+            "PACE_API_URL": self.pace_api_url, "PACE_API_USERNAME": self.pace_api_username,
+            "PACE_API_PASSWORD": self.pace_api_password,
+        }
 
     @property
     def tls_verify(self) -> bool | str:
@@ -188,6 +231,14 @@ class Settings:
             errors.append("SWITCH_TIMEOUT and SWITCH_MAX_FILE_MB must be greater than 0.")
         if self.env_file and not env_file_is_private(self.env_file):
             warnings.append(f"{self.env_file} is readable by other users. Run: chmod 600 '{self.env_file}'")
+        for name, value in (("SWITCH_AUTOFIX_MAP", self.autofix_map), ("PACE_QUERIES_FILE", self.pace_queries_file),
+                            ("PACE_ITEM_TEMPLATE_MAP", self.pace_item_template_map)):
+            if value and not Path(value).expanduser().is_file():
+                errors.append(f"{name} not found: {value}")
+        if self.pace_db_dsn and not self.pace_queries_file:
+            errors.append("PACE_DB_DSN is set but PACE_QUERIES_FILE is not.")
+        if self.digest_webhook_url and not self.digest_webhook_url.startswith("https://"):
+            errors.append("DIGEST_WEBHOOK_URL must start with https://.")
         if self.allow_write:
             warnings.append("Write tools are ON (SWITCH_ALLOW_WRITE=true): the assistant can submit, route and replace jobs.")
         if self.allow_flow_control:
