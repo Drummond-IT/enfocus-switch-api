@@ -201,6 +201,8 @@ def build_server(
         p = Path(raw).expanduser().resolve()
         if not _inside(p, allowed):
             raise ToolError(f"{p} is outside the allowed folders: {', '.join(map(str, allowed))}.")
+        if p.is_dir():  # Windows can't open a folder at all ("Permission denied"); say what it is
+            raise ToolError(f"Not a regular file: {p}")
         try:
             fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
         except FileNotFoundError as exc:
