@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import logging
 import os
 import re
 import stat
@@ -30,12 +31,16 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import preflight
+from .automation import analytics
 from .automation import tools as automation_tools
+from .automation.audit import AuditLog
+from .automation.customer_rules import CustomerRules, apply_to_analysis
 from .automation.pace import PaceError, PaceGateway, gateway_from_env
 from .client import SwitchClient, SwitchError
 from .config import Settings
 from .pdf_check import check_pdf
 
+log = logging.getLogger("switch_mcp")
 PARSE_TIMEOUT = 60  # seconds for parsing a report or checking a PDF
 READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 LOCAL_READ = ToolAnnotations(read_only_hint=True, open_world_hint=False)
@@ -155,9 +160,14 @@ def build_server(
     settings = settings or Settings.load()
     switch = client or SwitchClient(settings)
     config_errors, _ = settings.validate()
-    if pace is None and settings.pace_db_dsn and not config_errors:
+    try:
+        customer_rules = CustomerRules.load(settings.customer_rules or None)
+    except (OSError, ValueError) as exc:
+        customer_rules = CustomerRules([])
+        config_errors.append(f"CUSTOMER_RULES: {exc}")
+    if pace is None and settings.pace_enabled and not config_errors:
         try:
-            pace = gateway_from_env(settings.pace_env())
+            pace = gateway_from_env(settings.pace_env(), audit=AuditLog(settings.audit_log, "mcp"))
         except (PaceError, OSError) as exc:
             config_errors.append(f"Pace: {exc}")
     max_bytes = settings.max_file_mb * 1024 * 1024
@@ -209,6 +219,24 @@ def build_server(
         if len(data) > max_bytes:
             raise ToolError(f"{p.name} is larger than SWITCH_MAX_FILE_MB ({settings.max_file_mb} MB).")
         return p, data, st.st_mtime
+
+    def job_customer(job: dict[str, Any]) -> str | None:
+        """Customer name from a Switch job's custom fields (any field whose name contains 'customer')."""
+        for f in job.get("customFields") or []:
+            if "customer" in str(f.get("name", "")).lower() and str(f.get("value", "")).strip():
+                return str(f["value"]).strip()
+        return None
+
+    def record_analysis(analysis: dict[str, Any], source: str, job_ref: str | None = None,
+                        customer: str | None = None) -> None:
+        """Record a verdict for preflight analytics (ANALYTICS_DB). Never fails the calling tool."""
+        if not settings.analytics_db:
+            return
+        try:
+            analytics.record(settings.analytics_db, analysis, source, job_ref, customer,
+                             settings.analytics_retention_days)
+        except Exception as exc:  # noqa: BLE001 - analytics must never break a CSR's request
+            log.warning("Could not record preflight analytics: %s", exc)
 
     def save_download(name: str, data: bytes) -> Path:
         """Write into the download folder via a temp file + rename (never through a planted symlink)."""
@@ -439,16 +467,22 @@ def build_server(
 
     @mcp.tool(annotations=READ)
     async def explain_job_report(
-        job_id: str, audience: Literal["customer", "csr", "prepress"] = "customer"
+        job_id: str, audience: Literal["customer", "csr", "prepress"] = "customer", customer: str | None = None,
     ) -> dict[str, Any]:
         """Fetch the preflight report attached to a job in a checkpoint and explain it in plain language.
 
         Returns a verdict (ready / prepress_can_fix / needs_customer), grouped issues with pages,
-        who owns each fix, and a ready-to-send write-up for the chosen audience.
+        who owns each fix, and a ready-to-send write-up for the chosen audience. The customer's
+        standing agreements (CUSTOMER_RULES) are applied; the customer comes from `customer` or a
+        "Customer" custom field on the Switch job.
         """
         job = await require_job(job_id)
         content = await call(switch.download_report(job_id, max_bytes))
         analysis, fmt = await analyze_report(content)
+        customer = customer or job_customer(job)
+        analysis = apply_to_analysis(analysis, customer_rules.find(customer))
+        analysis["customer"] = customer
+        record_analysis(analysis, source="switch_job", job_ref=job.get("name"), customer=customer)
         ext = ".pdf" if fmt == "pdf-text" else ".json" if fmt == "pitstop-json" else \
             ".xml" if fmt.startswith("pitstop") else ".txt"
         saved = save_download(f"{job_id}_report{ext}", content)
@@ -465,6 +499,7 @@ def build_server(
         report_file: str | None = None,
         audience: Literal["customer", "csr", "prepress"] = "customer",
         job_name: str | None = None,
+        customer: str | None = None,
     ) -> dict[str, Any]:
         """Explain a preflight report in plain language without needing Switch.
 
@@ -478,6 +513,8 @@ def build_server(
             analysis, _ = await analyze_report(report.encode("utf-8"))
         else:
             raise ToolError("Provide report text or report_file.")
+        analysis = apply_to_analysis(analysis, customer_rules.find(customer))
+        record_analysis(analysis, source="tool", job_ref=job_name, customer=customer)
         analysis["write_up"] = preflight.render(analysis, audience, job_name)
         return analysis
 
@@ -652,7 +689,7 @@ def build_server(
 
     automation_tools.register(mcp, automation_tools.Context(
         settings=settings, switch=switch, pace=pace, call=call, read_local=read_local,
-        require_job=require_job, analyze_report=analyze_report,
+        require_job=require_job, analyze_report=analyze_report, customer_rules=customer_rules,
     ))
 
     # ------------------------------------------------------------- prompts

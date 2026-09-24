@@ -1,0 +1,10 @@
+{
+  "_comment": "Standing agreements per customer. Copy to ~/.config/enfocus-switch-mcp/customer_rules.json, edit, and set CUSTOMER_RULES. accept = issue categories the customer has accepted (no longer make the verdict 'needs customer'); prepress_fixes = categories we fix in-house for them; ticket_defaults = defaults for the file-vs-ticket check (bleed_in, binding). Categories are the keys in src/switch_mcp/knowledge.py. Keys starting with _ are ignored. The entries below are EXAMPLES: replace them.",
+  "Example Customer Inc": {
+    "aliases": ["Example Customer", "EXCUST"],
+    "accept": ["low_resolution"],
+    "prepress_fixes": ["missing_bleed"],
+    "ticket_defaults": {"bleed_in": 0.0625},
+    "notes": "EXAMPLE: signed low-resolution waiver on file."
+  }
+}

@@ -104,6 +104,13 @@ class Settings:
     # ---- automations (all optional; see docs/ai-connector-research.md) ----
     # JSON map of preflight category -> auto-fix route (see automation/autofix.py).
     autofix_map: str = ""
+    # JSON file of per-customer standing agreements (see automation/customer_rules.py).
+    customer_rules: str = ""
+    # SQLite file for preflight analytics (see automation/analytics.py). Empty = off.
+    analytics_db: str = ""
+    analytics_retention_days: int = 365
+    # JSON-lines audit trail of automated changes (Pace writes, service actions). Empty = log only.
+    audit_log: str = ""
     # Name of the checkpoint connection that means "proof approved".
     approve_connection: str = "Approve"
     # Regexes (";"-separated, one capture group) for job numbers in file names / emails.
@@ -115,6 +122,10 @@ class Settings:
     pace_api_username: str = ""
     pace_api_password: str = field(default="", repr=False)
     pace_item_template_map: str = ""
+    # Pace API writes (see pace_api.example.json): off unless PACE_ALLOW_WRITE=true.
+    pace_api_config: str = ""
+    pace_allow_write: bool = False
+    pace_allowed_statuses: str = ""
     pace_proof_approved_status: str = "Proof Approved"
     # Digest: incoming-webhook URL (Teams/Slack) and "stuck" threshold.
     digest_webhook_url: str = field(default="", repr=False)
@@ -165,6 +176,13 @@ class Settings:
             s.download_dir = Path(env["SWITCH_DOWNLOAD_DIR"].strip()).expanduser().resolve()
 
         s.autofix_map = env.get("SWITCH_AUTOFIX_MAP", "").strip()
+        s.customer_rules = env.get("CUSTOMER_RULES", "").strip()
+        s.analytics_db = env.get("ANALYTICS_DB", "").strip()
+        s.audit_log = env.get("AUDIT_LOG", "").strip()
+        try:
+            s.analytics_retention_days = int(env.get("ANALYTICS_RETENTION_DAYS", s.analytics_retention_days))
+        except ValueError as exc:
+            raise ConfigError(f"ANALYTICS_RETENTION_DAYS must be a whole number: {exc}") from exc
         s.approve_connection = env.get("SWITCH_APPROVE_CONNECTION", s.approve_connection).strip() or "Approve"
         s.job_number_patterns = env.get("PACE_JOB_NUMBER_PATTERNS", "").strip()
         s.pace_db_dsn = env.get("PACE_DB_DSN", "").strip()
@@ -173,6 +191,9 @@ class Settings:
         s.pace_api_username = env.get("PACE_API_USERNAME", "").strip()
         s.pace_api_password = env.get("PACE_API_PASSWORD", "")
         s.pace_item_template_map = env.get("PACE_ITEM_TEMPLATE_MAP", "").strip()
+        s.pace_api_config = env.get("PACE_API_CONFIG", "").strip()
+        s.pace_allow_write = _bool("PACE_ALLOW_WRITE", env.get("PACE_ALLOW_WRITE"), False)
+        s.pace_allowed_statuses = env.get("PACE_ALLOWED_STATUSES", "").strip()
         s.pace_proof_approved_status = env.get("PACE_PROOF_APPROVED_STATUS", s.pace_proof_approved_status).strip()
         s.digest_webhook_url = env.get("DIGEST_WEBHOOK_URL", "").strip()
         try:
@@ -186,8 +207,14 @@ class Settings:
         return {
             "PACE_DB_DSN": self.pace_db_dsn, "PACE_QUERIES_FILE": self.pace_queries_file,
             "PACE_API_URL": self.pace_api_url, "PACE_API_USERNAME": self.pace_api_username,
-            "PACE_API_PASSWORD": self.pace_api_password,
+            "PACE_API_PASSWORD": self.pace_api_password, "PACE_API_CONFIG": self.pace_api_config,
+            "PACE_ALLOW_WRITE": "true" if self.pace_allow_write else "false",
+            "PACE_ALLOWED_STATUSES": self.pace_allowed_statuses,
         }
+
+    @property
+    def pace_enabled(self) -> bool:
+        return bool(self.pace_db_dsn or self.pace_api_config)
 
     @property
     def tls_verify(self) -> bool | str:
@@ -231,12 +258,24 @@ class Settings:
             errors.append("SWITCH_TIMEOUT and SWITCH_MAX_FILE_MB must be greater than 0.")
         if self.env_file and not env_file_is_private(self.env_file):
             warnings.append(f"{self.env_file} is readable by other users. Run: chmod 600 '{self.env_file}'")
-        for name, value in (("SWITCH_AUTOFIX_MAP", self.autofix_map), ("PACE_QUERIES_FILE", self.pace_queries_file),
-                            ("PACE_ITEM_TEMPLATE_MAP", self.pace_item_template_map)):
+        for name, value in (("SWITCH_AUTOFIX_MAP", self.autofix_map), ("CUSTOMER_RULES", self.customer_rules),
+                            ("PACE_QUERIES_FILE", self.pace_queries_file),
+                            ("PACE_ITEM_TEMPLATE_MAP", self.pace_item_template_map),
+                            ("PACE_API_CONFIG", self.pace_api_config)):
             if value and not Path(value).expanduser().is_file():
                 errors.append(f"{name} not found: {value}")
         if self.pace_db_dsn and not self.pace_queries_file:
             errors.append("PACE_DB_DSN is set but PACE_QUERIES_FILE is not.")
+        if self.pace_api_url and not self.pace_api_url.startswith("https://"):
+            api_host = urlsplit(self.pace_api_url).hostname or ""
+            if not _is_local(api_host):
+                warnings.append("PACE_API_URL is not https: the Pace API password travels unprotected.")
+        if self.pace_allow_write and not self.pace_allowed_statuses:
+            errors.append("PACE_ALLOW_WRITE is on but PACE_ALLOWED_STATUSES is empty: list the statuses "
+                          "automation may set (comma separated).")
+        if self.pace_allow_write:
+            warnings.append("Pace writes are ON (PACE_ALLOW_WRITE=true): automation can change job statuses "
+                            f"({self.pace_allowed_statuses}) and add notes in Pace.")
         if self.digest_webhook_url and not self.digest_webhook_url.startswith("https://"):
             errors.append("DIGEST_WEBHOOK_URL must start with https://.")
         if self.allow_write:
