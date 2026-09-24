@@ -58,7 +58,7 @@ jobs:
       - name: requirements.lock matches uv.lock
         run: |
           uv export --frozen --no-dev --extra pace --no-emit-project -o /tmp/requirements.lock
-          diff /tmp/requirements.lock requirements.lock || (echo "Run: uv export --frozen --no-dev --extra pace --no-emit-project -o requirements.lock" && exit 1)
+          diff <(grep -v '^#' /tmp/requirements.lock) <(grep -v '^#' requirements.lock) || (echo "Run: uv export --frozen --no-dev --extra pace --no-emit-project -o requirements.lock" && exit 1)
       - name: Build the service image
         run: docker build -t enfocus-switch-mcp:ci .
       - name: Smoke test (health, auth, one endpoint)
