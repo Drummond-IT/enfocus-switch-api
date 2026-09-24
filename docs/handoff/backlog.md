@@ -231,7 +231,8 @@ Task IDs (e.g. `P1-03`) are for cross-references. Put them in the Asana task nam
 ### P4-05 Confirm how Switch sends the job ID and API key
 - **Owner:** SW
 - **Acceptance:**
-  - [ ] The Switch variable that gives the Web Services job ID is identified and tested.
+  - [ ] The Switch variable that gives the Web Services job ID is identified and tested (or `job_name` is
+    used instead).
   - [ ] The HTTP request element (or script element) sends the key header.
   - [ ] The choice is recorded in the runbook.
 

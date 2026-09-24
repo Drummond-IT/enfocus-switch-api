@@ -216,11 +216,15 @@ when the proof is sent, and so on. Settings:
 | URL | `https://switch-automation.drummond.local/switch/events` |
 | Method | POST |
 | Header | `X-API-Key: <switch key>`, `Content-Type: application/json` |
-| Body | `{"event": "proof_sent", "job_id": "<job id>", "pace_job_number": "[Metadata.Text:Path=\"...\"]"}` |
+| Body | `{"event": "proof_sent", "job_id": "<job id>"}` or `{"event": "proof_sent", "job_name": "[Job.Name]"}`, optionally with `"pace_job_number"` from job metadata |
 
 - **`event`** must be a name in `service_status_map.json`.
 - **`job_id`** is the Switch Web Services job ID. **Verify in UAT which Switch variable gives it in your Switch
   version** (compare with `find_jobs` in Claude).
+- If no variable gives the ID, send **`job_name`** instead: the job's name exactly as Switch shows it,
+  e.g. `[Job.Name]`.
+  - When several jobs share the name, the one waiting in a checkpoint is used.
+  - If that is still ambiguous, the service answers 409 and changes nothing.
 - **`pace_job_number`** is optional. Without it, the service looks for the number in the job name, using
   `PACE_JOB_NUMBER_PATTERNS`.
 

@@ -209,6 +209,16 @@ def job_number_field(data: Any, key: str = "pace_job_number") -> str | None:
     return value
 
 
+def job_id_field(data: Any) -> str | None:
+    value = text_field(data, "job_id", max_len=100)
+    if value is None:
+        return None
+    try:
+        return safe_id(value, "job_id")
+    except SwitchError as exc:
+        raise ServiceError(400, str(exc)) from exc
+
+
 def step(system: str, action: str, detail: str, status: str = "planned", result: str | None = None) -> dict[str, Any]:
     return {"system": system, "action": action, "detail": detail, "status": status, "result": result}
 
@@ -404,12 +414,32 @@ def create_app(settings: Settings, switch: SwitchClient | None = None, pace: Pac
         return {"job_number": best, "candidates": candidates,
                 "ambiguous": len(candidates) > 1, "found": bool(candidates)}
 
+    async def resolve_job(data: dict[str, Any]) -> dict[str, Any]:
+        """The Switch job from 'job_id' (Web Services ID) or, failing that, its exact 'job_name'."""
+        job_id = job_id_field(data)
+        if job_id:
+            job = await state.switch.get_job(job_id)
+            if not job:
+                raise ServiceError(404, f"No Switch job {job_id}.")
+            return job
+        name = text_field(data, "job_name", max_len=250)
+        if not name:
+            raise ServiceError(400, "Send 'job_id' (or 'job_name').")
+        found = (await state.switch.list_jobs(filter_query={"and": [{"name": {"is": name}}]}, limit=10)).get("data") or []
+        waiting = [j for j in found if j.get("status") == "alert"]
+        matches = waiting if len(found) > 1 and waiting else found
+        if not matches:
+            raise ServiceError(404, f"No Switch job named {name!r}.")
+        if len(matches) > 1:
+            raise ServiceError(409, f"{len(matches)} Switch jobs are named {name!r}; send 'job_id' instead.")
+        return matches[0]
+
     # ---------------------------------------------------------- /proof/approve (A5)
 
     async def proof_approve(request: Request, key: ApiKey, audit: dict[str, Any]) -> dict[str, Any]:
         data = await read_json(request)
-        job_id = safe_id(text_field(data, "job_id", required=True, max_len=100) or "", "job_id")
         approved_by = text_field(data, "approved_by", required=True) or ""
+        job_id = str((await resolve_job(data))["id"])
         pace_job = job_number_field(data)
         run_dry = dry_run or bool(data.get("dry_run"))
         audit.update(job_id=job_id, approved_by=approved_by, pace_job_number=pace_job, dry_run=run_dry)
@@ -433,10 +463,8 @@ def create_app(settings: Settings, switch: SwitchClient | None = None, pace: Pac
         if rule is None:
             known = ", ".join(sorted(state.status_map)) or "none: set SERVICE_STATUS_MAP"
             raise ServiceError(400, f"Unknown event '{event}'. Known events: {known}.")
-        job_id = safe_id(text_field(data, "job_id", required=True, max_len=100) or "", "job_id")
-        job = await state.switch.get_job(job_id)
-        if not job:
-            raise ServiceError(404, f"No Switch job {job_id}.")
+        job = await resolve_job(data)
+        job_id = str(job["id"])
         job_name = str(job.get("name", job_id))
         customer = text_field(data, "customer") or customer_from_job(job)
         pace_job = job_number_field(data)

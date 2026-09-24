@@ -196,7 +196,7 @@ def test_proof_approve_live(make_app, fake, fake_pace):
         r = c.post("/proof/approve", json={"job_id": "job-1", "approved_by": "Sam", "dry_run": True}, headers=auth())
         assert r.json()["dry_run"] is True
         assert c.post("/proof/approve", json={"job_id": "job-2", "approved_by": "Sam"}, headers=auth()).status_code == 409
-        assert c.post("/proof/approve", json={"job_id": "../x", "approved_by": "Sam"}, headers=auth()).status_code == 502
+        assert c.post("/proof/approve", json={"job_id": "../x", "approved_by": "Sam"}, headers=auth()).status_code == 400
         assert c.post("/proof/approve", json={"job_id": "job-1"}, headers=auth()).status_code == 400
 
 
@@ -273,3 +273,13 @@ def test_rfq_validate_endpoint(make_app, api_keys):
                                           "colors": "4/4", "stock": "100lb gloss", "evil": {"x": 1}},
                    headers={"X-API-Key": "forms-key"})
     assert r.status_code == 200 and r.json()["ready_to_quote"] is True
+
+
+def test_event_by_job_name(make_app, fake_pace):
+    with make_app() as c:
+        r = c.post("/switch/events", json={"event": "proof_sent", "job_name": "ORD1001_Brochure.pdf"}, headers=auth())
+        assert r.status_code == 200 and r.json()["job"] == "ORD1001_Brochure.pdf"
+        r = c.post("/switch/events", json={"event": "proof_sent", "job_name": "nope.pdf"}, headers=auth())
+        assert r.status_code == 404
+        r = c.post("/switch/events", json={"event": "proof_sent"}, headers=auth())
+        assert r.status_code == 400 and "job_id" in r.json()["error"]
