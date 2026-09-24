@@ -1,4 +1,4 @@
-"""Command line: ``enfocus-switch-mcp [serve|check] [--env-file PATH]``."""
+"""Command line: ``enfocus-switch-mcp [serve|check|digest|report|service|service-key] [--env-file PATH]``."""
 
 from __future__ import annotations
 
@@ -34,7 +34,12 @@ def _describe(settings: Settings) -> list[str]:
         f"Download folder  : {settings.download_dir}",
         f"Auto-fix map     : {settings.autofix_map or '(not set)'}",
         f"Pace database    : {'set (read-only queries: ' + settings.pace_queries_file + ')' if settings.pace_db_dsn else '(not set)'}",
+        f"Pace API writes  : {_pace_writes(settings)}",
+        f"Audit log        : {settings.audit_log or '(application log only)'}",
+        f"Web service      : {_service_line(settings)}",
         f"Digest webhook   : {'set' if settings.digest_webhook_url else '(not set)'}",
+        f"Customer rules   : {settings.customer_rules or '(not set)'}",
+        f"Analytics DB     : {settings.analytics_db or '(off)'}",
     ]
 
 
@@ -63,9 +68,25 @@ async def _probe(settings: Settings) -> list[str]:
             lines.append(f"--  Message log not readable ({exc}); recent_messages/problem_summary won't work.")
     finally:
         await client.aclose()
-    if settings.pace_db_dsn:
+    if settings.pace_enabled:
         lines.append(_probe_pace(settings))
     return lines
+
+
+def _service_line(settings: Settings) -> str:
+    if not settings.service_keys_file:
+        return "(not set up: SERVICE_KEYS_FILE)"
+    mode = "DRY RUN" if settings.service_dry_run else "LIVE"
+    return (f"{settings.service_host}:{settings.service_port}, {mode}, auto-route "
+            f"{'ON' if settings.service_auto_route else 'off'}")
+
+
+def _pace_writes(settings: Settings) -> str:
+    if not settings.pace_api_config:
+        return "(not configured: Pace steps are reported as manual)"
+    if not settings.pace_allow_write:
+        return f"configured ({settings.pace_api_config}) but OFF (PACE_ALLOW_WRITE)"
+    return f"ON; allowed statuses: {settings.pace_allowed_statuses or '(none)'}"
 
 
 def _probe_pace(settings: Settings) -> str:
@@ -73,8 +94,11 @@ def _probe_pace(settings: Settings) -> str:
 
     try:
         gw = gateway_from_env(settings.pace_env())
+        if gw is None or not getattr(gw, "can_read", True):
+            # Write-only: don't send a test write; the config file was loaded and validated above.
+            return "OK  Pace API config loaded (no database: nothing to read; writes are not test-sent)."
         gw.get_job_status("__connector_check__")  # any result (usually none) proves the query runs
-    except PaceError as exc:
+    except (PaceError, OSError, ValueError) as exc:
         return f"--  Pace: {exc}"
     except Exception as exc:  # noqa: BLE001 - driver/network errors, reported plainly
         return f"--  Pace database not reachable: {exc.__class__.__name__}: {exc}"
@@ -85,6 +109,9 @@ def check(settings: Settings) -> int:
     print(f"enfocus-switch-mcp {__version__}")
     print("\n".join(_describe(settings)))
     errors, warnings = settings.validate()
+    if settings.service_keys_file:
+        s_errors, s_warnings = settings.validate_service()
+        errors, warnings = errors + s_errors, warnings + s_warnings
     for w in warnings:
         print(f"WARNING: {w}")
     if errors:
@@ -142,17 +169,88 @@ def run_digest(settings: Settings, hours: int, post: bool) -> int:
     return 0
 
 
+def run_report(settings: Settings, days: int, customer: str | None) -> int:
+    from .automation import analytics
+
+    if not settings.analytics_db:
+        print("ERROR: set ANALYTICS_DB to use reports.", file=sys.stderr)
+        return 2
+    print(analytics.render_markdown(analytics.report(settings.analytics_db, days, customer)))
+    return 0
+
+
+def run_service(settings: Settings) -> int:
+    from . import service
+
+    errors, warnings = settings.validate()
+    s_errors, s_warnings = settings.validate_service()
+    for w in warnings + s_warnings:
+        log.warning(w)
+    if errors + s_errors:
+        for e in errors + s_errors:
+            log.error(e)
+        log.error("Fix the errors above (run `enfocus-switch-mcp check`), then start the service again.")
+        return 2
+    try:
+        service.run(settings)
+    except (OSError, ValueError) as exc:  # bad keys/status map/customer rules file: fail at start-up
+        log.error("Could not start the service: %s", exc)
+        return 2
+    return 0
+
+
+def run_service_key(settings: Settings, name: str | None, scopes: str | None) -> int:
+    import json
+    import os
+    from pathlib import Path
+
+    from . import service
+
+    if not name or not scopes:
+        print(f"Usage: enfocus-switch-mcp service-key --name portal --scopes preflight\n"
+              f"Scopes: {', '.join(service.SCOPES)} (comma separated).", file=sys.stderr)
+        return 2
+    try:
+        key, entry = service.new_key(name, [s.strip() for s in scopes.split(",") if s.strip()])
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"API key for '{name}' (shown once; store it in the caller's secret store):\n\n    {key}\n")
+    if not settings.service_keys_file:
+        print("SERVICE_KEYS_FILE is not set. Add this entry to your keys file:\n")
+        print(json.dumps(entry, indent=2))
+        return 0
+    path = Path(settings.service_keys_file).expanduser()
+    data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if name in data:
+        print(f"Replacing the existing key '{name}' (the old key stops working when the service restarts).")
+    data.update(entry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")  # write a new file, then swap it in: never a half-written keys file
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
+    print(f"Saved the key's hash to {path}. Restart the service to use it.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="enfocus-switch-mcp",
         description="MCP server for Enfocus Switch. With no command it runs the server over stdio "
                     "(this is what Claude Desktop / Claude Code start).",
     )
-    parser.add_argument("command", nargs="?", default="serve", choices=["serve", "check", "digest"],
+    parser.add_argument("command", nargs="?", default="serve", choices=["serve", "check", "digest", "report", "service", "service-key"],
                         help="serve (default): run the MCP server; check: verify config and connection; "
-                             "digest: print the checkpoint/error digest")
+                             "digest: print the checkpoint/error digest; report: preflight analytics; "
+                             "service: run the automation web service; service-key: create an API key")
     parser.add_argument("--post", action="store_true", help="digest: also send it to DIGEST_WEBHOOK_URL")
     parser.add_argument("--hours", type=int, default=16, help="digest: look back this many hours for errors")
+    parser.add_argument("--days", type=int, default=30, help="report: look back this many days")
+    parser.add_argument("--customer", help="report: only this customer")
+    parser.add_argument("--name", help="service-key: who uses the key (e.g. portal, switch)")
+    parser.add_argument("--scopes", help="service-key: comma-separated scopes (e.g. preflight)")
     parser.add_argument("--env-file", help="config file of KEY=value lines (overrides SWITCH_ENV_FILE)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
@@ -168,6 +266,12 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(check(settings))
     if args.command == "digest":
         raise SystemExit(run_digest(settings, args.hours, args.post))
+    if args.command == "report":
+        raise SystemExit(run_report(settings, args.days, args.customer))
+    if args.command == "service":
+        raise SystemExit(run_service(settings))
+    if args.command == "service-key":
+        raise SystemExit(run_service_key(settings, args.name, args.scopes))
 
     from .server import build_server
 

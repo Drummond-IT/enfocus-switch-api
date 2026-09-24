@@ -104,6 +104,13 @@ class Settings:
     # ---- automations (all optional; see docs/ai-connector-research.md) ----
     # JSON map of preflight category -> auto-fix route (see automation/autofix.py).
     autofix_map: str = ""
+    # JSON file of per-customer standing agreements (see automation/customer_rules.py).
+    customer_rules: str = ""
+    # SQLite file for preflight analytics (see automation/analytics.py). Empty = off.
+    analytics_db: str = ""
+    analytics_retention_days: int = 365
+    # JSON-lines audit trail of automated changes (Pace writes, service actions). Empty = log only.
+    audit_log: str = ""
     # Name of the checkpoint connection that means "proof approved".
     approve_connection: str = "Approve"
     # Regexes (";"-separated, one capture group) for job numbers in file names / emails.
@@ -115,7 +122,22 @@ class Settings:
     pace_api_username: str = ""
     pace_api_password: str = field(default="", repr=False)
     pace_item_template_map: str = ""
+    # Pace API writes (see pace_api.example.json): off unless PACE_ALLOW_WRITE=true.
+    pace_api_config: str = ""
+    pace_allow_write: bool = False
+    pace_allowed_statuses: str = ""
     pace_proof_approved_status: str = "Proof Approved"
+    # Automation web service (`enfocus-switch-mcp service`; see service.py).
+    service_host: str = "127.0.0.1"
+    service_port: int = 8765
+    service_keys_file: str = ""
+    service_max_upload_mb: int = 100
+    service_dry_run: bool = True
+    service_status_map: str = ""
+    service_auto_route: bool = False
+    service_rate_limit_per_min: int = 60
+    service_tls_cert: str = ""
+    service_tls_key: str = ""
     # Digest: incoming-webhook URL (Teams/Slack) and "stuck" threshold.
     digest_webhook_url: str = field(default="", repr=False)
     digest_stuck_hours: float = 4.0
@@ -165,6 +187,13 @@ class Settings:
             s.download_dir = Path(env["SWITCH_DOWNLOAD_DIR"].strip()).expanduser().resolve()
 
         s.autofix_map = env.get("SWITCH_AUTOFIX_MAP", "").strip()
+        s.customer_rules = env.get("CUSTOMER_RULES", "").strip()
+        s.analytics_db = env.get("ANALYTICS_DB", "").strip()
+        s.audit_log = env.get("AUDIT_LOG", "").strip()
+        try:
+            s.analytics_retention_days = int(env.get("ANALYTICS_RETENTION_DAYS", s.analytics_retention_days))
+        except ValueError as exc:
+            raise ConfigError(f"ANALYTICS_RETENTION_DAYS must be a whole number: {exc}") from exc
         s.approve_connection = env.get("SWITCH_APPROVE_CONNECTION", s.approve_connection).strip() or "Approve"
         s.job_number_patterns = env.get("PACE_JOB_NUMBER_PATTERNS", "").strip()
         s.pace_db_dsn = env.get("PACE_DB_DSN", "").strip()
@@ -173,7 +202,24 @@ class Settings:
         s.pace_api_username = env.get("PACE_API_USERNAME", "").strip()
         s.pace_api_password = env.get("PACE_API_PASSWORD", "")
         s.pace_item_template_map = env.get("PACE_ITEM_TEMPLATE_MAP", "").strip()
+        s.pace_api_config = env.get("PACE_API_CONFIG", "").strip()
+        s.pace_allow_write = _bool("PACE_ALLOW_WRITE", env.get("PACE_ALLOW_WRITE"), False)
+        s.pace_allowed_statuses = env.get("PACE_ALLOWED_STATUSES", "").strip()
         s.pace_proof_approved_status = env.get("PACE_PROOF_APPROVED_STATUS", s.pace_proof_approved_status).strip()
+        s.service_host = env.get("SERVICE_HOST", s.service_host).strip() or s.service_host
+        s.service_keys_file = env.get("SERVICE_KEYS_FILE", "").strip()
+        s.service_status_map = env.get("SERVICE_STATUS_MAP", "").strip()
+        s.service_tls_cert = env.get("SERVICE_TLS_CERT", "").strip()
+        s.service_tls_key = env.get("SERVICE_TLS_KEY", "").strip()
+        s.service_dry_run = _bool("SERVICE_DRY_RUN", env.get("SERVICE_DRY_RUN"), True)
+        s.service_auto_route = _bool("SERVICE_AUTO_ROUTE", env.get("SERVICE_AUTO_ROUTE"), False)
+        try:
+            s.service_port = int(env.get("SERVICE_PORT", s.service_port))
+            s.service_max_upload_mb = int(env.get("SERVICE_MAX_UPLOAD_MB", s.service_max_upload_mb))
+            s.service_rate_limit_per_min = int(env.get("SERVICE_RATE_LIMIT_PER_MIN", s.service_rate_limit_per_min))
+        except ValueError as exc:
+            raise ConfigError(f"SERVICE_PORT / SERVICE_MAX_UPLOAD_MB / SERVICE_RATE_LIMIT_PER_MIN must be whole "
+                              f"numbers: {exc}") from exc
         s.digest_webhook_url = env.get("DIGEST_WEBHOOK_URL", "").strip()
         try:
             s.digest_stuck_hours = float(env.get("DIGEST_STUCK_HOURS", s.digest_stuck_hours))
@@ -186,8 +232,43 @@ class Settings:
         return {
             "PACE_DB_DSN": self.pace_db_dsn, "PACE_QUERIES_FILE": self.pace_queries_file,
             "PACE_API_URL": self.pace_api_url, "PACE_API_USERNAME": self.pace_api_username,
-            "PACE_API_PASSWORD": self.pace_api_password,
+            "PACE_API_PASSWORD": self.pace_api_password, "PACE_API_CONFIG": self.pace_api_config,
+            "PACE_ALLOW_WRITE": "true" if self.pace_allow_write else "false",
+            "PACE_ALLOWED_STATUSES": self.pace_allowed_statuses,
         }
+
+    @property
+    def pace_enabled(self) -> bool:
+        return bool(self.pace_db_dsn or self.pace_api_config)
+
+    def validate_service(self) -> tuple[list[str], list[str]]:
+        """Extra checks for the automation web service. Returns (errors, warnings)."""
+        errors: list[str] = []
+        warnings: list[str] = []
+        if not self.service_keys_file:
+            errors.append("SERVICE_KEYS_FILE is not set: create one with `enfocus-switch-mcp service-key`.")
+        elif not Path(self.service_keys_file).expanduser().is_file():
+            errors.append(f"SERVICE_KEYS_FILE not found: {self.service_keys_file}")
+        for name, value in (("SERVICE_STATUS_MAP", self.service_status_map),
+                            ("SERVICE_TLS_CERT", self.service_tls_cert), ("SERVICE_TLS_KEY", self.service_tls_key)):
+            if value and not Path(value).expanduser().is_file():
+                errors.append(f"{name} not found: {value}")
+        if bool(self.service_tls_cert) != bool(self.service_tls_key):
+            errors.append("Set both SERVICE_TLS_CERT and SERVICE_TLS_KEY, or neither.")
+        if not 0 < self.service_port < 65536:
+            errors.append("SERVICE_PORT must be 1-65535.")
+        if self.service_max_upload_mb <= 0 or self.service_rate_limit_per_min <= 0:
+            errors.append("SERVICE_MAX_UPLOAD_MB and SERVICE_RATE_LIMIT_PER_MIN must be greater than 0.")
+        if not _is_local(self.service_host) and not self.service_tls_cert:
+            warnings.append(f"The service listens on {self.service_host}: put it behind a reverse proxy with "
+                            "https and connection/header timeouts (nginx, IIS ARR). API keys travel in every "
+                            "request, and the service itself doesn't close idle connections.")
+        if self.service_dry_run:
+            warnings.append("SERVICE_DRY_RUN is on (default): the service plans changes but makes none.")
+        if self.service_auto_route:
+            warnings.append("SERVICE_AUTO_ROUTE is on: checkpoint jobs whose issues are all auto-fixable are routed "
+                            "to the auto-fix branch without a person.")
+        return errors, warnings
 
     @property
     def tls_verify(self) -> bool | str:
@@ -231,12 +312,24 @@ class Settings:
             errors.append("SWITCH_TIMEOUT and SWITCH_MAX_FILE_MB must be greater than 0.")
         if self.env_file and not env_file_is_private(self.env_file):
             warnings.append(f"{self.env_file} is readable by other users. Run: chmod 600 '{self.env_file}'")
-        for name, value in (("SWITCH_AUTOFIX_MAP", self.autofix_map), ("PACE_QUERIES_FILE", self.pace_queries_file),
-                            ("PACE_ITEM_TEMPLATE_MAP", self.pace_item_template_map)):
+        for name, value in (("SWITCH_AUTOFIX_MAP", self.autofix_map), ("CUSTOMER_RULES", self.customer_rules),
+                            ("PACE_QUERIES_FILE", self.pace_queries_file),
+                            ("PACE_ITEM_TEMPLATE_MAP", self.pace_item_template_map),
+                            ("PACE_API_CONFIG", self.pace_api_config)):
             if value and not Path(value).expanduser().is_file():
                 errors.append(f"{name} not found: {value}")
         if self.pace_db_dsn and not self.pace_queries_file:
             errors.append("PACE_DB_DSN is set but PACE_QUERIES_FILE is not.")
+        if self.pace_api_url and not self.pace_api_url.startswith("https://"):
+            api_host = urlsplit(self.pace_api_url).hostname or ""
+            if not _is_local(api_host):
+                warnings.append("PACE_API_URL is not https: the Pace API password travels unprotected.")
+        if self.pace_allow_write and not self.pace_allowed_statuses:
+            errors.append("PACE_ALLOW_WRITE is on but PACE_ALLOWED_STATUSES is empty: list the statuses "
+                          "automation may set (comma separated).")
+        if self.pace_allow_write:
+            warnings.append("Pace writes are ON (PACE_ALLOW_WRITE=true): automation can change job statuses "
+                            f"({self.pace_allowed_statuses}) and add notes in Pace.")
         if self.digest_webhook_url and not self.digest_webhook_url.startswith("https://"):
             errors.append("DIGEST_WEBHOOK_URL must start with https://.")
         if self.allow_write:

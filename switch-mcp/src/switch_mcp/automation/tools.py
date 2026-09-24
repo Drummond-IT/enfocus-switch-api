@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,8 @@ from mcp.types import ToolAnnotations
 
 from ..client import SwitchClient
 from ..config import Settings
-from . import autofix, digest, estimate_draft, job_matching, ticket_check, workflows
+from . import analytics, autofix, digest, estimate_draft, job_matching, rfq, ticket_check, workflows
+from .customer_rules import CustomerRules, spec_defaults
 from .pace import PaceError, PaceGateway
 from .pdf_facts import PdfFacts, analyse_pdf
 from .specs import JobSpec, SpecError
@@ -34,10 +35,13 @@ class Context:
     read_local: Callable[..., tuple[Path, bytes, float]]
     require_job: Callable[[str], Awaitable[dict[str, Any]]]
     analyze_report: Callable[[bytes], Awaitable[tuple[dict[str, Any], str]]]
+    customer_rules: CustomerRules = field(default_factory=lambda: CustomerRules([]))
 
 
 def register(mcp: MCPServer, ctx: Context) -> None:
     settings = ctx.settings
+    # Pace reads need the database; a write-only (API) gateway can't look jobs up.
+    pace_reader = ctx.pace if ctx.pace is not None and getattr(ctx.pace, "can_read", True) else None
 
     async def facts_for(file_path: str) -> PdfFacts:
         path, data, _ = ctx.read_local(file_path)
@@ -59,7 +63,7 @@ def register(mcp: MCPServer, ctx: Context) -> None:
 
     # ---------------------------------------------------------- file vs ticket
 
-    @mcp.tool(annotations=READ if ctx.pace else LOCAL_READ)
+    @mcp.tool(annotations=READ if pace_reader else LOCAL_READ)
     async def compare_file_to_ticket(
         file_path: str,
         pace_job_number: str | None = None,
@@ -70,20 +74,21 @@ def register(mcp: MCPServer, ctx: Context) -> None:
         bleed_in: float | None = None,
         binding: str | None = None,
         product: str | None = None,
+        customer: str | None = None,
     ) -> dict[str, Any]:
         """Check a customer PDF against what was ordered: size, page count, sides, inks, spot colors, bleed.
 
         The ticket comes from Pace (pace_job_number, when Pace is connected) and/or the arguments,
         which override Pace values: trim "8.5 x 11" or "85 x 55 mm", colors "4/4", "4/0", "1/1",
-        "4/4 + PMS 185 C". Returns a verdict (matches_ticket / check_with_customer / does_not_match)
+        "4/4 + PMS 185 C". The customer's standing agreements (e.g. their bleed) apply as defaults. Returns a verdict (matches_ticket / check_with_customer / does_not_match)
         and plain-language issues a CSR can pass on.
         """
         base: dict[str, Any] = {}
         if pace_job_number:
-            if ctx.pace is None:
-                raise ToolError("Pace isn't connected; pass the ticket details as arguments instead "
+            if pace_reader is None:
+                raise ToolError("Pace database isn't connected; pass the ticket details as arguments instead "
                                 "(or look them up with the Pace MCP first).")
-            spec = await pace_call(ctx.pace.get_job_spec, pace_job_number)
+            spec = await pace_call(pace_reader.get_job_spec, pace_job_number)
             if spec is None:
                 raise ToolError(f"No Pace job {pace_job_number}.")
             base = spec.as_dict()
@@ -94,7 +99,9 @@ def register(mcp: MCPServer, ctx: Context) -> None:
         overrides = {"trim": trim, "pages": pages, "colors": colors, "spot_colors": spot_colors,
                      "bleed_in": bleed_in, "binding": binding, "product": product}
         try:
-            merged = {**{k: v for k, v in base.items()}, **{k: v for k, v in overrides.items() if v is not None}}
+            customer = customer or base.get("customer")
+            merged = {**spec_defaults(ctx.customer_rules.find(customer)), **base,
+                      **{k: v for k, v in overrides.items() if v is not None}}
             if "trim_in" in merged and "trim" not in merged:
                 merged["trim"] = merged.pop("trim_in")
             spec = JobSpec.from_dict(merged)
@@ -129,10 +136,40 @@ def register(mcp: MCPServer, ctx: Context) -> None:
             "pace_item_template": estimate_draft.to_item_template(draft, field_map, item_template),
             "field_map_is_placeholder": not settings.pace_item_template_map,
         }
-        if ctx.pace:
+        if pace_reader:
             spec = JobSpec(trim_in=draft.trim_in, pages=draft.pages)
-            result["similar_pace_jobs"] = await pace_call(ctx.pace.find_similar_jobs, spec, 5)
+            result["similar_pace_jobs"] = await pace_call(pace_reader.find_similar_jobs, spec, 5)
         return result
+
+    @mcp.tool(annotations=LOCAL_READ)
+    async def validate_job_spec(
+        product: str | None = None,
+        quantity: str | None = None,
+        trim: str | None = None,
+        pages: int | None = None,
+        colors: str | None = None,
+        stock: str | None = None,
+        binding: str | None = None,
+        folding: str | None = None,
+        finishing: str | None = None,
+        due_date: str | None = None,
+        delivery: str | None = None,
+        artwork: str | None = None,
+        customer: str | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Check a request for quote is complete before it goes to an estimator.
+
+        Pass what the customer asked for (e.g. from an RFQ email): quantity can list several
+        ("500, 1000, 2500"), trim "8.5 x 11", colors "4/4" or "4/0", due_date as YYYY-MM-DD when known.
+        Returns the normalized spec, what's missing, production problems (e.g. saddle stitch needs a
+        multiple of 4 pages) and plain-language questions to send the customer. Nothing is priced.
+        """
+        return rfq.validate_rfq({
+            "product": product, "quantity": quantity, "trim": trim, "pages": pages, "colors": colors,
+            "stock": stock, "binding": binding, "folding": folding, "finishing": finishing,
+            "due_date": due_date, "delivery": delivery, "artwork": artwork, "customer": customer, "notes": notes,
+        })
 
     # ---------------------------------------------------------- auto-fix plan
 
@@ -154,7 +191,7 @@ def register(mcp: MCPServer, ctx: Context) -> None:
 
     # ---------------------------------------------------------- job matching
 
-    @mcp.tool(annotations=READ if ctx.pace else LOCAL_READ)
+    @mcp.tool(annotations=READ if pace_reader else LOCAL_READ)
     async def find_job_numbers(text: str) -> dict[str, Any]:
         """Find job numbers in a file name, email subject or body. With Pace connected, each candidate
         is looked up so you can see which one is a real, open job."""
@@ -163,9 +200,9 @@ def register(mcp: MCPServer, ctx: Context) -> None:
         except ValueError as exc:
             raise ToolError(f"PACE_JOB_NUMBER_PATTERNS: {exc}") from exc
         candidates = [asdict(c) for c in job_matching.find_job_numbers(text, patterns)]
-        if ctx.pace:
+        if pace_reader:
             for c in candidates[:10]:
-                c["pace"] = await pace_call(ctx.pace.get_job_status, c["job_number"])
+                c["pace"] = await pace_call(pace_reader.get_job_status, c["job_number"])
         return {"candidates": candidates}
 
     # ---------------------------------------------------------- digest
@@ -178,10 +215,22 @@ def register(mcp: MCPServer, ctx: Context) -> None:
         d["markdown"] = digest.render_markdown(d)
         return d
 
+    # ---------------------------------------------------------- analytics (only when enabled)
+
+    if settings.analytics_db:
+
+        @mcp.tool(annotations=LOCAL_READ)
+        async def preflight_stats(days: int = 30, customer: str | None = None) -> dict[str, Any]:
+            """Preflight results over time: how often files needed the customer, the most common issues,
+            and which customers' files most often have problems (for targeted client education)."""
+            r = await asyncio.to_thread(analytics.report, settings.analytics_db, max(1, min(days, 3650)), customer)
+            r["markdown"] = analytics.render_markdown(r)
+            return r
+
     # ---------------------------------------------------------- Pace (only when connected)
 
-    if ctx.pace is not None:
-        pace = ctx.pace
+    if pace_reader is not None:
+        pace = pace_reader
 
         @mcp.tool(annotations=READ)
         async def pace_job(job_number: str) -> dict[str, Any]:
@@ -252,7 +301,8 @@ def register(mcp: MCPServer, ctx: Context) -> None:
         return (
             "Extract the print specs from this request for quote: product, quantity (all quantities if "
             "several), finished size, pages, colors per side (as '4/4', '4/0', ...), spot colors, stock, "
-            "finishing, binding, due date, delivery. Put 'not given' for anything missing, then list the "
-            "questions to send back to the customer. Use find_job_numbers if it references an earlier job.\n\n"
+            "finishing, binding, due date, delivery. Only use what the email says; never guess. Pass what you "
+            "found to validate_job_spec, then show its missing details, problems and questions to send back "
+            "to the customer. Use find_job_numbers if it references an earlier job.\n\n"
             f"Email:\n{email_text}"
         )

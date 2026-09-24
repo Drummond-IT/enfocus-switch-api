@@ -7,9 +7,10 @@ care where the data comes from:
   database (use a read-only role, ideally on a replica). The SQL lives in a
   queries file you fill in for your Pace schema (see ``pace_queries.example.sql``);
   each query must return the column names documented there.
-* Writes (status updates, notes, estimates) must go through the official Pace
-  API, never straight into the database. ``PaceApiWriter`` is the placeholder
-  for that; until it is implemented every write reports "manual step" instead.
+* Writes (status updates, notes) go through the official Pace API, never straight
+  into the database: ``PaceApiWriter`` sends requests the Pace team defines in
+  ``pace_api.json``, only when ``PACE_ALLOW_WRITE=true`` and only for statuses in
+  ``PACE_ALLOWED_STATUSES``. Otherwise every write reports "manual step".
 * ``FakePaceGateway`` - in-memory data for tests and demos.
 
 Claude can also reach Pace through a separate Pace MCP server. The MCP
@@ -18,10 +19,17 @@ prompts in ``server.py`` show how to combine the two without this gateway.
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
+from xml.sax.saxutils import escape as xml_escape
+
+import httpx
 
 from .specs import JobSpec
 
@@ -34,6 +42,8 @@ QUERY_CONTRACT: dict[str, list[str]] = {
                      "quantity", "price", "created"],
 }
 
+
+log = logging.getLogger("switch_mcp.pace")
 
 class PaceError(RuntimeError):
     pass
@@ -80,27 +90,125 @@ def load_queries(path: str | Path) -> dict[str, str]:
 
 
 class PaceApiWriter:
-    """Placeholder for writes through the official Pace API.
+    """Writes to Pace through its HTTP API, driven by a config file (``PACE_API_CONFIG``).
 
-    TODO(pace-team): implement with the Pace web services (or delegate to the Pace MCP):
-      - update_job_status: set the job's status / milestone (e.g. "Proof Approved")
-      - add_job_note: append a job note visible to CSRs
-    Keep writes here, behind an allow-list of statuses, never as SQL against the database.
+    The Pace team fills in, per operation, the HTTP method, path and body template from the
+    Pace API documentation (see ``pace_api.example.json``). Placeholders ``{job_number}``,
+    ``{status}`` and ``{note}`` are escaped for the body type (JSON or XML/SOAP) and URL-quoted
+    in the path. Safety:
+
+    * nothing is sent unless ``PACE_ALLOW_WRITE=true``; otherwise writes report "manual step";
+    * only statuses in ``PACE_ALLOWED_STATUSES`` can be set;
+    * every attempt is written to the audit callback (``audit``), success or not.
     """
 
-    def __init__(self, base_url: str | None = None, username: str | None = None, password: str | None = None):
-        self.base_url, self.username, self._password = base_url, username, password
+    OPERATIONS = ("update_job_status", "add_job_note")
+
+    def __init__(self, config: dict[str, Any] | None = None, base_url: str | None = None,
+                 username: str | None = None, password: str | None = None, allow_write: bool = False,
+                 allowed_statuses: list[str] | None = None, transport: Any = None,
+                 audit: Callable[[dict[str, Any]], None] | None = None):
+        self.config = config or {}
+        self.base_url = (base_url or self.config.get("base_url") or "").rstrip("/")
+        self.username, self._password = username, password
+        self.allow_write = allow_write
+        self.allowed_statuses = [s.strip() for s in (allowed_statuses or []) if s.strip()]
+        self._transport = transport
+        self._audit = audit or (lambda event: None)
+
+    @classmethod
+    def load_config(cls, path: str | Path) -> dict[str, Any]:
+        data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        ops = data.get("operations") if isinstance(data, dict) else None
+        if not isinstance(ops, dict):
+            raise PaceError(f"{path}: expected an object with an 'operations' object.")
+        for name, op in ops.items():
+            if name.startswith("_"):
+                continue
+            if name not in cls.OPERATIONS:
+                raise PaceError(f"{path}: unknown operation '{name}' (known: {', '.join(cls.OPERATIONS)}).")
+            missing = [k for k in ("method", "path", "body") if not op.get(k)]
+            if missing:
+                raise PaceError(f"{path}: operation '{name}' is missing {', '.join(missing)}.")
+            if str(op["method"]).upper() not in ("POST", "PUT", "PATCH"):
+                raise PaceError(f"{path}: operation '{name}' method must be POST, PUT or PATCH.")
+            content_type = str(op.get("content_type", "application/json")).lower()
+            if "json" not in content_type and "xml" not in content_type:
+                # Only JSON and XML bodies can be escaped safely; values come partly from customers.
+                raise PaceError(f"{path}: operation '{name}' content_type must be JSON or XML.")
+        return data
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.config.get("operations"))
+
+    def _fill(self, template: str, values: dict[str, str], content_type: str) -> str:
+        def esc(v: str) -> str:
+            if "json" in content_type:
+                return json.dumps(v)
+            if "xml" in content_type:
+                return xml_escape(v, {'"': "&quot;", "'": "&apos;"})
+            return v
+        out = template
+        for key, value in values.items():
+            out = out.replace("{" + key + "}", esc(value))
+        return out
+
+    def _send(self, operation: str, values: dict[str, str]) -> dict[str, Any]:
+        event = {"operation": operation, **{k: v for k, v in values.items() if k != "note"},
+                 "note_chars": len(values.get("note", ""))}
+        if not self.configured:
+            self._audit(event | {"result": "manual", "reason": "not configured"})
+            raise PaceWriteNotImplemented(
+                f"Pace writes aren't configured (PACE_API_CONFIG): do '{operation}' for job "
+                f"{values.get('job_number')} in Pace by hand.")
+        if not self.allow_write:
+            self._audit(event | {"result": "manual", "reason": "PACE_ALLOW_WRITE is off"})
+            raise PaceWriteNotImplemented(
+                f"Pace writes are turned off (PACE_ALLOW_WRITE): do '{operation}' for job "
+                f"{values.get('job_number')} in Pace by hand.")
+        op = self.config["operations"].get(operation)
+        if not op:
+            self._audit(event | {"result": "manual", "reason": "operation not configured"})
+            raise PaceWriteNotImplemented(f"No '{operation}' operation in PACE_API_CONFIG: do it in Pace by hand.")
+        content_type = op.get("content_type", "application/json")
+        path = op["path"]
+        for key, value in values.items():
+            path = path.replace("{" + key + "}", quote(value, safe=""))
+        body = self._fill(op["body"], values, content_type)
+        headers = {"Content-Type": content_type, **{str(k): str(v) for k, v in op.get("headers", {}).items()}}
+        auth = (self.username, self._password) if self.username else None
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=float(self.config.get("timeout", 30)),
+                              transport=self._transport, follow_redirects=False) as client:
+                resp = client.request(str(op["method"]).upper(), path, content=body.encode("utf-8"),
+                                      headers=headers, auth=auth)
+        except httpx.HTTPError as exc:
+            self._audit(event | {"result": "failed", "reason": exc.__class__.__name__})
+            raise PaceError(f"Pace API not reachable: {exc.__class__.__name__}") from exc
+        if resp.status_code >= 400:
+            self._audit(event | {"result": "failed", "http_status": resp.status_code})
+            log.warning("Pace API refused %s (HTTP %s): %s", operation, resp.status_code, resp.text[:500])
+            raise PaceError(f"Pace API refused '{operation}' (HTTP {resp.status_code}); details are in the service log.")
+        self._audit(event | {"result": "done", "http_status": resp.status_code})
+        return {"ok": True, "http_status": resp.status_code}
 
     def update_job_status(self, job_number: str, status: str, note: str | None = None) -> dict[str, Any]:
-        raise PaceWriteNotImplemented(
-            f"Pace write not implemented yet: set job {job_number} status to '{status}' in Pace by hand.")
+        if self.allowed_statuses and status not in self.allowed_statuses:
+            raise PaceError(f"Status '{status}' is not in PACE_ALLOWED_STATUSES "
+                            f"({', '.join(self.allowed_statuses)}).")
+        if not self.allowed_statuses and self.allow_write:
+            raise PaceError("PACE_ALLOWED_STATUSES is empty: list the statuses automation may set.")
+        return self._send("update_job_status", {"job_number": job_number, "status": status, "note": note or ""})
 
     def add_job_note(self, job_number: str, note: str) -> dict[str, Any]:
-        raise PaceWriteNotImplemented(f"Pace write not implemented yet: add this note to job {job_number} by hand.")
+        return self._send("add_job_note", {"job_number": job_number, "note": note[:4000]})
 
 
 class PacePostgresGateway:
     """Read-only access to the Pace database. Requires ``pip install 'enfocus-switch-mcp[pace]'``."""
+
+    can_read = True
 
     def __init__(self, dsn: str, queries: dict[str, str], writer: PaceApiWriter | None = None,
                  statement_timeout_ms: int = 10_000):
@@ -118,7 +226,7 @@ class PacePostgresGateway:
             from psycopg.rows import dict_row
         except ImportError as exc:  # pragma: no cover - depends on the optional extra
             raise PaceNotConfigured("Install the Pace extra: uv tool install './switch-mcp[pace]'.") from exc
-        with psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False) as conn:
+        with psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False, connect_timeout=5) as conn:
             conn.read_only = True  # the session refuses writes even if the role could
             with conn.cursor() as cur:
                 cur.execute(f"SET LOCAL statement_timeout = {int(self.statement_timeout_ms)}")
@@ -156,6 +264,7 @@ class FakePaceGateway:
     jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
     writes: list[dict[str, Any]] = field(default_factory=list)
     allow_writes: bool = True
+    can_read: bool = True
 
     def get_job_spec(self, job_number: str) -> JobSpec | None:
         job = self.jobs.get(job_number)
@@ -186,13 +295,41 @@ class FakePaceGateway:
         return self._write("note", job_number=job_number, note=note)
 
 
-def gateway_from_env(env: dict[str, str]) -> PaceGateway | None:
+class PaceWriteOnlyGateway:
+    """Pace API writes without database reads (reads report that PACE_DB_DSN is needed)."""
+
+    can_read = False
+
+    def __init__(self, writer: PaceApiWriter):
+        self.writer = writer
+
+    def _no_reads(self, *args: Any) -> Any:
+        raise PaceNotConfigured("Reading from Pace needs PACE_DB_DSN and PACE_QUERIES_FILE.")
+
+    get_job_spec = get_job_status = find_similar_jobs = _no_reads
+
+    def update_job_status(self, job_number: str, status: str, note: str | None = None) -> dict[str, Any]:
+        return self.writer.update_job_status(job_number, status, note)
+
+    def add_job_note(self, job_number: str, note: str) -> dict[str, Any]:
+        return self.writer.add_job_note(job_number, note)
+
+
+def gateway_from_env(env: dict[str, str], audit: Callable[[dict[str, Any]], None] | None = None,
+                     transport: Any = None) -> PaceGateway | None:
     """Build the configured gateway, or None when Pace isn't set up (Pace tools stay hidden)."""
     dsn = env.get("PACE_DB_DSN", "").strip()
+    api_config_file = env.get("PACE_API_CONFIG", "").strip()
+    config = PaceApiWriter.load_config(api_config_file) if api_config_file else None
+    writer = PaceApiWriter(
+        config, env.get("PACE_API_URL"), env.get("PACE_API_USERNAME"), env.get("PACE_API_PASSWORD"),
+        allow_write=env.get("PACE_ALLOW_WRITE", "").strip().lower() in ("1", "true", "yes", "on"),
+        allowed_statuses=[s for s in env.get("PACE_ALLOWED_STATUSES", "").split(",") if s.strip()],
+        transport=transport, audit=audit,
+    )
     if not dsn:
-        return None
+        return PaceWriteOnlyGateway(writer) if writer.configured else None
     queries_file = env.get("PACE_QUERIES_FILE", "").strip()
     if not queries_file:
         raise PaceNotConfigured("PACE_DB_DSN is set but PACE_QUERIES_FILE is not.")
-    writer = PaceApiWriter(env.get("PACE_API_URL"), env.get("PACE_API_USERNAME"), env.get("PACE_API_PASSWORD"))
     return PacePostgresGateway(dsn, load_queries(queries_file), writer)

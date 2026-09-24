@@ -12,12 +12,13 @@ import re
 from dataclasses import dataclass
 
 DEFAULT_PATTERNS = [
-    r"\bjob\s*(?:no\.?|number|#)?\s*[:#-]?\s*(\d{4,8})\b",   # "Job 123456", "job #123456"
-    r"\bJ[-_ ]?(\d{4,8})\b",                                   # "J123456", "J-123456"
-    r"\b(ORD\d{3,8})\b",                                        # "ORD1001"
-    r"(?:^|[\\/_\s])(\d{5,8})(?=[_\-\s.])",                    # "123456_Brochure.pdf"
+    # Separators are bounded ({0,5}) so a long run of spaces can't cause catastrophic backtracking.
+    r"\bjob[\s:#-]{0,5}(?:no\.?|number|#)?[\s:#-]{0,5}(\d{4,8})(?!\d)",  # "Job 123456", "job #123456"
+    r"(?<![A-Za-z0-9])J[-_ ]?(\d{4,8})(?!\d)",                            # "J123456", "J-123456", "J123456_x"
+    r"(?<![A-Za-z0-9])(ORD\d{3,8})(?!\d)",                                # "ORD1001", "ORD1001_Brochure.pdf"
+    r"(?:^|[\\/_\s])(\d{5,8})(?=[_\-\s.])",                             # "123456_Brochure.pdf"
 ]
-MAX_TEXT = 20_000
+MAX_TEXT = 5_000  # subjects, file names and the start of an email body are enough
 
 
 @dataclass

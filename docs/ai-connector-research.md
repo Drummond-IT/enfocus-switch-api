@@ -67,8 +67,16 @@ Each idea below has a **status**:
 | Status | Meaning |
 |---|---|
 | **Built** | Working and tested in `switch-mcp`; needs only configuration and live validation |
-| **Scaffolded** | Code, config and tests exist; one clearly marked piece (usually a Pace write or a query) is left for the team |
+| **Built, needs config** | Code and tests are done; it needs a house-specific file (Pace SQL, Pace API endpoints, a map) before it can run |
 | **Design** | Written up here with the building blocks it would use; no dedicated code yet |
+
+The IT handoff package ([`handoff/`](handoff/README.md)) turns this into a deployable plan:
+- component readiness
+- deployment
+- UAT
+- rollout
+- backlog
+- training
 
 ### How the pieces fit
 
@@ -81,9 +89,12 @@ flowchart LR
   end
   Claude[Claude Desktop / Code] -->|MCP| SW[switch-mcp]
   Claude -->|MCP| PMCP[Pace MCP]
+  Portal[Web-to-print portal backend] -->|HTTPS + API key| SVC[automation service]
+  Switch -->|HTTP request element + API key| SVC
+  SVC --- SW
   SW -->|REST, read + opt-in write| Switch[(Enfocus Switch + PitStop Server)]
   SW -->|read-only SQL| PDB[(Pace PostgreSQL, read-only role)]
-  SW -.->|writes: stub until Pace API writer exists| PAPI[Pace API]
+  SW -->|writes: allow-listed statuses + notes, off until PACE_ALLOW_WRITE| PAPI[Pace API]
   Sched[Scheduled task] -->|enfocus-switch-mcp digest --post| SW
   SW -->|incoming webhook| Teams[Teams / Slack]
 ```
@@ -97,6 +108,15 @@ There are two ways Pace data reaches Claude, and both are supported:
   (digest, webhooks) and for one-call tools such as `compare_file_to_ticket(pace_job_number=…)`. It reads
   through SQL you write in `pace_queries.sql`, on a read-only role, inside a read-only transaction.
 
+Writes to Pace go only through the Pace API (`PaceApiWriter`). The operations (endpoint, method, body
+template) are configured in `pace_api.json` from the Pace API documentation. Writes are refused unless
+`PACE_ALLOW_WRITE=true`, and statuses are refused unless they are in `PACE_ALLOWED_STATUSES`. Every
+attempt is audited.
+
+The **automation web service** (`enfocus-switch-mcp service`, `service.py`) runs the same code for callers
+that aren't people using Claude: Switch flows and the portal. It needs scoped API keys, is dry-run by
+default, and has no LLM in the path.
+
 ### Client services
 
 #### A1. Plain-language preflight explanations: **Built**
@@ -107,7 +127,7 @@ There are two ways Pace data reaches Claude, and both are supported:
 - **Where:** `preflight.py`, `knowledge.py`; tools `explain_job_report` and `explain_preflight_report`; prompt `customer_preflight_email`.
 - **Next:** Validate against real reports. Tune the wording and fix owners in `knowledge.py` to house policy.
 
-#### A2. Client self-serve preflight: **Design** (building blocks built)
+#### A2. Client self-serve preflight: **Built** (portal integration and the full-PitStop submission left)
 - **Problem:** Bad files are found hours after upload, sometimes after the job is scheduled.
 - **How:**
   1. The web-to-print portal posts the upload to a small internal service.
@@ -116,27 +136,30 @@ There are two ways Pace data reaches Claude, and both are supported:
   3. It returns the customer write-up from `preflight.render(..., "customer")` within seconds.
   4. In parallel it submits the file to a "Client Preflight" Switch submit point. PitStop runs the full profile,
      and the explained report is sent to the client when it's ready.
-- **Building blocks:** `quick_check_pdf`, `compare_file_to_ticket`, `explain_job_report`, prompt `client_preflight_reply`.
-- **To build:** A thin HTTP service (not the MCP server) behind the portal. It must:
-  - use the portal's own authentication
-  - cap upload sizes
-  - use a dedicated Switch submit point
-  - never give clients Claude access directly
+- **Where:** `service.py` `POST /preflight`, called by the portal **backend** with a `preflight`-scope key.
+  It does steps 1–3, applies customer rules and records analytics. It only compares against a Pace job when
+  that job belongs to the customer the portal names, so one customer can't see another's order.
+- **Left (portal + Switch teams):**
+  - Call the endpoint from the portal backend; never from the browser.
+  - Show `message` to the customer.
+  - Step 4: submit the file to the "Client Preflight" submit point. The events endpoint (`explain: true`)
+    returns the explained PitStop report for the portal to show.
 - **Guardrails:** The deterministic write-ups need no LLM in the path. If an LLM rewrites the text, a CSR reviews
   it before it's sent.
 
-#### A3. Customer messages saved to Pace: **Scaffolded**
+#### A3. Customer messages saved to Pace: **Built, needs config** (Pace API endpoints)
 - **How:** The explanation for a checkpoint job becomes a Pace job note, so every CSR sees the same text.
-- **Where:** `PaceGateway.add_job_note`. The writer is a stub (`PaceApiWriter`) until it's implemented with the Pace API.
-- **Next (Pace team):** Implement `PaceApiWriter.add_job_note` with the Pace API. Until then, the tools return the
-  note text to paste in.
+- **Where:** `PaceApiWriter.add_job_note`, used by `approve_proof` and `/switch/events`; the events endpoint
+  adds the preflight verdict to the note.
+- **Next (Pace team):** Fill in `add_job_note` in `pace_api.json` from the Pace API documentation, test on a Pace
+  test system, then set `PACE_ALLOW_WRITE=true`. Until then, the note text is returned as a manual step.
 
-#### A4. "Where's my job?": **Built** (Switch side), **Scaffolded** (Pace side)
+#### A4. "Where's my job?": **Built** (Switch side), **Built, needs config** (Pace side: `job_status` SQL)
 - **How:** `find_jobs` / `find_job_numbers` give where the job is in Switch. `pace_job` gives the Pace status,
   due date and CSR. The prompt `csr_order_status` combines them into what to tell the customer.
 - **Next:** Fill in the `job_status` query in `pace_queries.sql`.
 
-#### A5. Proof approval that closes the loop: **Scaffolded**
+#### A5. Proof approval that closes the loop: **Built, needs config** (Pace API endpoints)
 - **Problem:** Approvals arrive by email or phone. Someone routes the Switch job, someone else updates Pace, and
   steps get missed.
 - **How:** `approve_proof(job_id, approved_by, pace_job_number)`:
@@ -144,16 +167,17 @@ There are two ways Pace data reaches Claude, and both are supported:
   2. Set the Pace status to `PACE_PROOF_APPROVED_STATUS`.
   3. Add a Pace note saying who approved and when.
 - It defaults to a **dry run** that shows the plan. Pace steps come back as `manual`, with instructions, until
-  the Pace writer exists.
-- **Where:** `automation/workflows.py`; tool `approve_proof`, which needs `SWITCH_ALLOW_WRITE=true`.
+  Pace writes are configured and on.
+- **Where:** `automation/workflows.py`. In Claude it is the tool `approve_proof`, which needs
+  `SWITCH_ALLOW_WRITE=true`. Portals and Switch call `POST /proof/approve` (scope `proof_approve`) instead.
 - **Next:**
-  - Implement `PaceApiWriter.update_job_status` and `PaceApiWriter.add_job_note`.
-  - Decide the exact status name.
-  - Later: trigger it from the portal's "Approve" button through the A2 service instead of by hand.
+  - Configure the Pace API operations (A3).
+  - Decide the exact status name and put it in `PACE_ALLOWED_STATUSES`.
+  - Wire the portal's "Approve" button to `/proof/approve`.
 
 ### Prepress
 
-#### B1. File vs. job ticket check: **Built** (Pace lookup scaffolded)
+#### B1. File vs. job ticket check: **Built** (Pace lookup needs the `job_spec` SQL)
 - **Problem:** Wrong size, page count or colors are found at plating, or on press.
 - **How:** `pdf_facts` measures each page:
   - trim size and bleed
@@ -183,7 +207,8 @@ There are two ways Pace data reaches Claude, and both are supported:
 - **Next (Switch team):**
   1. Build an "Auto-fix" branch after the preflight checkpoint (PitStop Action Lists, then preflight again).
   2. Fill in the map.
-  3. Later: route automatically when the plan says every issue is auto-fixable.
+  3. Automatic routing is built: the Switch event `preflight_done` with `auto_route: true`, plus
+     `SERVICE_AUTO_ROUTE=true`, routes jobs whose open issues are all auto-fixable. Turn it on after UAT.
 
 #### B3. Morning digest and stuck-job alerts: **Built**
 - **How:** The digest lists:
@@ -194,18 +219,20 @@ There are two ways Pace data reaches Claude, and both are supported:
   `enfocus-switch-mcp digest --post` sends it to a Teams/Slack incoming webhook.
 - **Where:** `automation/digest.py`; tool `morning_digest`; CLI `digest`.
 - **Next:** Schedule it: cron / Task Scheduler at 7:00 on a machine with the connector configured.
-- **Later:** Near-real-time alerts. A Switch HTTP-request element posts "job arrived in checkpoint" to a small
-  service, which calls the same code.
+- **Later:** Near-real-time alerts. The automation service already receives Switch events; posting an
+  alert for chosen events to the webhook is a small addition (backlog).
 
-#### B4. Match incoming files and emails to jobs: **Built** (Pace lookup scaffolded)
+#### B4. Match incoming files and emails to jobs: **Built** (Pace lookup needs the `job_status` SQL)
 - **How:** `find_job_numbers(text)` finds job numbers in file names and emails using `PACE_JOB_NUMBER_PATTERNS`.
   With Pace connected, it also looks up each candidate.
 - **Next:** Set the patterns to Drummond's job number format.
-- **Later:** Use it in a hot-folder or email-intake flow to attach the job number as Switch metadata automatically.
+- **Unattended:** An intake flow calls `POST /switch/match-job` (scope `match_job`) with the file name or email
+  subject. It gets back `job_number` when exactly one job matches, and `ambiguous: true` otherwise, so the flow
+  can route those to a person.
 
 ### Estimating
 
-#### C1. Draft an estimate from a print file: **Built** (Pace item creation scaffolded)
+#### C1. Draft an estimate from a print file: **Built** (creating the Pace item is still by hand)
 - **How:** `draft_item_from_pdf` reads the file and returns:
   - finished size and the matching standard product (business card, postcard, flyer, booklet...)
   - pages, sides and inks per side
@@ -221,13 +248,19 @@ There are two ways Pace data reaches Claude, and both are supported:
   - Estimators enter the payload in Pace (by hand or with the Pace MCP) until an API writer creates items directly.
 - **Guardrail:** It never prices anything. Pricing stays in Pace, done by a person.
 
-#### C2. RFQ email to estimate request: **Design** (prompt built)
-- **How:** The `rfq_to_estimate` prompt extracts specs from a request for quote: quantities, size, colors,
-  stock, finishing, dates. It marks what's missing and drafts the questions to send back.
-- **Next:** Connect the estimating mailbox with the Microsoft 365 connector so Claude can read RFQs. Normalize
-  the output into `JobSpec` so it can go into C1 and C3.
+#### C2. RFQ email to estimate request: **Built** (mailbox connection left)
+- **How:**
+  1. The `rfq_to_estimate` prompt extracts specs from a request for quote.
+  2. `validate_job_spec` (MCP) or `POST /rfq/validate` (web forms, scope `rfq`) normalizes them into a `JobSpec`.
+     It handles several quantities, e.g. "500, 1000, 2.5k".
+  3. It lists what's missing for that product family and flags production problems (saddle stitch needs a
+     multiple of 4 pages, perfect binding needs enough pages).
+  4. It writes plain questions to send the customer.
+- **Where:** `automation/rfq.py`. Required fields per product are in `REQUIRED`: tune them to how the
+  estimators quote.
+- **Next:** Connect the estimating mailbox with the Microsoft 365 connector so Claude can read RFQs.
 
-#### C3. Similar-job lookup: **Scaffolded**
+#### C3. Similar-job lookup: **Built, needs config** (`similar_jobs` SQL)
 - **How:** The `similar_jobs` query finds recent jobs with the same size and pages. `draft_item_from_pdf` lists
   them as a pricing sanity check.
 - **Next:** Write the `similar_jobs` SQL, for example matching size and pages within the last 12 months, and
@@ -235,33 +268,45 @@ There are two ways Pace data reaches Claude, and both are supported:
 
 ### Workflow and reporting
 
-#### D1. Switch ↔ Pace status sync: **Design**
+#### D1. Switch → Pace status sync: **Built, needs config** (Pace API endpoints, event map)
 - **How:**
-  - Switch milestones (prepress started, proof sent, approved, plated) post to a small service, via the Switch
-    HTTP element or a script element.
-  - The service calls `PaceGateway.update_job_status` for each milestone.
-  - In the other direction, Pace job changes such as cancel or hold can lock the Switch job (`set_job_lock`).
-- **Needs:**
-  - the Pace API writer
-  - a mapping of Switch flow stages to Pace statuses
-  - an allow-list of statuses the automation may set
+  1. A Switch "HTTP request" element at each milestone posts `{"event": "proof_sent", "job_id": "[Job.Id]"}` to
+     `POST /switch/events`. Milestones include preflight done, proof sent and sent to press.
+  2. `SERVICE_STATUS_MAP` says, per event, which Pace status to set, the note text, and whether to explain
+     the preflight report.
+  3. The Pace job number comes from the call, or from the Switch job name (`PACE_JOB_NUMBER_PATTERNS`).
+  4. The status must also be in `PACE_ALLOWED_STATUSES`.
+- **Where:** `service.py`, `service_status_map.example.json`.
+- **Not built (backlog):** Pace → Switch, e.g. locking the Switch job (`set_job_lock`) when a Pace job goes on
+  hold. It needs a Pace-side trigger, such as a Pace event or a scheduled query.
 
-#### D2. Analytics: **Design**
-- **Ideas:**
-  - Preflight failure rate by customer and issue type, to target client education such as sending our PDF
-    export guide.
-  - Time spent in checkpoints against turnaround targets.
-  - Proof rounds per job.
-- **How:** Log each analysis (verdict and categories, no file contents) with the Pace customer, and query the
-  Switch Reporting module with `graphql_query`.
-- **Needs:** a small table, for example in a reporting schema, and a decision on retention.
+#### D2. Analytics: **Built** (preflight results); checkpoint time and proof rounds are **Design**
+- **Built:** Every explained report is recorded in `ANALYTICS_DB` (SQLite): time, source, customer, job,
+  verdict and issue categories. File contents are never recorded. Rows are deleted after
+  `ANALYTICS_RETENTION_DAYS`.
+  - Sources: Claude tools, the portal, and Switch events.
+  - `preflight_stats` (MCP) and `enfocus-switch-mcp report` show, per customer, how often files need them and
+    for which issues. Use this to target client education, such as sending the PDF export guide.
+- **Design:** Time in checkpoints against turnaround targets, and proof rounds per job, from the Switch
+  Reporting module (`graphql_query`). If a shared database is preferred later, move the table into a
+  reporting schema.
 
-#### D3. Customer-specific rules: **Design**
-- **Example:** A customer who always accepts low-resolution images at their own risk. Their verdicts should
-  come back as `ready` with a note instead of `needs_customer`.
-- **How:** Store per-customer overrides next to Pace customer records and apply them in `preflight.analyze`.
+#### D3. Customer-specific rules: **Built**
+- **Example:** A customer who always accepts low-resolution images at their own risk. Their verdicts come back
+  without "needs customer" for that issue, which is listed as accepted.
+- **How:** `CUSTOMER_RULES` (JSON, `customer_rules.example.json`) lists per customer:
+  - `accept`: issue types the customer has accepted
+  - `prepress_fixes`: issue types we fix in-house
+  - `ticket_defaults`: e.g. their usual bleed
+  - aliases for the customer's name
+
+  The rules apply in the explain tools, the file-vs-ticket check, the portal endpoint and Switch events.
+- **Later:** Keep the rules next to Pace customer records, e.g. a Pace custom field read by a query.
 
 ### Suggested order
+
+The phases, owners and acceptance criteria are in [`handoff/rollout.md`](handoff/rollout.md) and
+[`handoff/backlog.md`](handoff/backlog.md). In short:
 
 1. **Live validation of what's built:**
    - Switch user and `check`
@@ -269,18 +314,21 @@ There are two ways Pace data reaches Claude, and both are supported:
    - write actions on a test flow
 2. **Pace, read-only:**
    - Fill in `pace_queries.sql` (job_spec, job_status, similar_jobs).
-   - Turn on B1, A4, B4 and C3 in one call each.
+   - This turns on B1, A4, B4 and C3 in one call each.
 3. **Quick wins:**
    - Schedule the digest (B3).
    - Build the auto-fix branch and map (B2).
    - Set job number patterns (B4).
+   - Customer rules and analytics (D3, D2).
 4. **Pace writes:**
-   - Implement `PaceApiWriter` with the Pace API and a status allow-list.
+   - Fill in `pace_api.json` and the status allow-list.
+   - Test on a Pace test system.
    - Turn on A3, A5 and D1.
-5. **Client-facing:**
-   - Self-serve preflight service (A2).
-   - Portal-driven proof approval.
-6. **Estimating depth and analytics:** C1 → C2 → D2.
+5. **Automation service, then client-facing:**
+   - Switch events (D1, B2 auto-route).
+   - Self-serve preflight in the portal (A2).
+   - Portal-driven proof approval (A5).
+6. **Estimating depth:** C1 → C2 (mailbox) → C3.
 
 ### Guardrails for all of these
 

@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Pace API writes used by approve_proof and the automation service.",
+    "PLACEHOLDERS: the paths and bodies below are NOT real Pace endpoints. The Pace admin fills them in",
+    "from your Pace version's API documentation (EPACE web services / REST), then tests against a",
+    "Pace TEST system with PACE_ALLOW_WRITE=true and PACE_ALLOWED_STATUSES set.",
+    "Placeholders: {job_number}, {status}, {note}. They are URL-encoded in 'path' and escaped for",
+    "the content_type (JSON or XML) in 'body'. For JSON bodies do NOT put quotes around them.",
+    "Only 'update_job_status' and 'add_job_note' are supported. Leave one out to keep it manual.",
+    "base_url may be set here or with PACE_API_URL (the env var wins). Credentials: PACE_API_USERNAME /",
+    "PACE_API_PASSWORD (HTTP basic auth). Extra 'headers' are sent as-is: never put secrets in this file."
+  ],
+  "base_url": "https://pace.example.local/rpc/rest/services",
+  "timeout": 30,
+  "operations": {
+    "update_job_status": {
+      "method": "POST",
+      "path": "/UpdateObject/updateJob",
+      "content_type": "application/json",
+      "body": "{\"job\": {job_number}, \"adminStatus\": {status}}"
+    },
+    "add_job_note": {
+      "method": "POST",
+      "path": "/CreateObject/createJobNote",
+      "content_type": "application/json",
+      "body": "{\"job\": {job_number}, \"note\": {note}}"
+    }
+  }
+}

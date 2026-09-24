@@ -6,12 +6,13 @@
     3. Add a Pace job note recording who approved and when.
 
 Dry run (the default) returns the plan without changing anything. Steps
-that can't be automated yet (Pace writes until ``PaceApiWriter`` exists) come
-back as ``manual`` with the exact instruction for a person.
+that aren't automated (Pace writes while ``PACE_API_CONFIG`` / ``PACE_ALLOW_WRITE``
+are not set up) come back as ``manual`` with the exact instruction for a person.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -81,9 +82,9 @@ async def approve_proof(
             continue
         try:
             if s.action == "update_status":
-                pace.update_job_status(pace_job_number, pace_status, note)  # type: ignore[arg-type]
+                await asyncio.to_thread(pace.update_job_status, pace_job_number, pace_status, note)
             else:
-                pace.add_job_note(pace_job_number, note)  # type: ignore[arg-type]
+                await asyncio.to_thread(pace.add_job_note, pace_job_number, note)
             s.status, s.result = "done", "ok"
         except PaceWriteNotImplemented as exc:
             s.status, s.result = "manual", str(exc)

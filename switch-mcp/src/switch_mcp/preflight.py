@@ -295,9 +295,30 @@ def parse_report(content: str | bytes) -> ParsedReport:
     return parse_text_report(content)
 
 
+def analyze_bytes(content: bytes, content_type: str = "") -> tuple[dict[str, Any], str]:
+    """Analyse a downloaded report of any supported kind (XML, JSON, text or a PDF report).
+
+    Returns (analysis, source format). Raises ValueError for anything that can't be read.
+    """
+    try:
+        if content[:5] == b"%PDF-" or "pdf" in content_type:
+            import io
+
+            from pypdf import PdfReader
+
+            text = "\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages)
+            return analyze(parse_text_report(text)), "pdf-text"
+        parsed = parse_report(content)
+    except ValueError:
+        raise
+    except Exception as exc:  # pypdf raises many types for damaged files
+        raise ValueError(f"Could not read the report: {exc}") from exc
+    return analyze(parsed), parsed.source_format
+
+
 # --------------------------------------------------------------------- explain
 
-SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2, "fixed": 3, "signed_off": 4}
+SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2, "fixed": 3, "signed_off": 4, "accepted": 5}
 
 
 def _page_text(pages: list[int]) -> str:
@@ -314,6 +335,21 @@ def _page_text(pages: list[int]) -> str:
         if p is not None:
             start = prev = p
     return ("page " if len(pages) == 1 else "pages ") + ", ".join(ranges)
+
+
+def decide_verdict(issues: list[dict[str, Any]]) -> tuple[str, str]:
+    """Overall verdict from grouped issues. Used by ``analyze`` and by anything that adjusts issues later
+    (customer rules), so every path decides the same way."""
+    open_issues = [i for i in issues if i["severity"] in ("error", "warning")]
+    blocking = [i for i in open_issues if i["severity"] == "error"]
+    customer_needed = [i for i in open_issues if i["fix_owner"] == "customer"
+                       or (i["severity"] == "error" and i["fix_owner"] == "either" and not i["auto_fixable"])]
+    if not open_issues:
+        return "ready", "Ready to print."
+    if customer_needed:
+        return "needs_customer", ("Needs something from the customer before it can print." if blocking else
+                                  "Can print, but the customer should approve or improve a few things first.")
+    return "prepress_can_fix", "Prepress can fix the remaining items in-house; no customer action needed."
 
 
 def analyze(report: ParsedReport) -> dict[str, Any]:
@@ -347,18 +383,7 @@ def analyze(report: ParsedReport) -> dict[str, Any]:
             "explanation": {"customer": cat.customer, "csr": cat.csr, "prepress": cat.prepress},
         })
 
-    open_issues = [i for i in issues if i["severity"] in ("error", "warning")]
-    blocking = [i for i in open_issues if i["severity"] == "error"]
-    customer_needed = [i for i in open_issues if i["fix_owner"] == "customer"
-                       or (i["severity"] == "error" and i["fix_owner"] == "either" and not i["auto_fixable"])]
-    if not open_issues:
-        verdict, verdict_text = "ready", "Ready to print."
-    elif customer_needed:
-        verdict = "needs_customer"
-        verdict_text = "Needs something from the customer before it can print." if blocking else \
-            "Can print, but the customer should approve or improve a few things first."
-    else:
-        verdict, verdict_text = "prepress_can_fix", "Prepress can fix the remaining items in-house; no customer action needed."
+    verdict, verdict_text = decide_verdict(issues)
 
     counts: dict[str, int] = {}
     for f in report.findings:
@@ -379,6 +404,7 @@ def render(analysis: dict[str, Any], audience: Audience = "customer", job_name: 
     name = job_name or analysis["summary"].get("file") or "your file"
     open_issues = [i for i in analysis["issues"] if i["severity"] in ("error", "warning")]
     fixed = [i for i in analysis["issues"] if i["severity"] in ("fixed", "signed_off")]
+    accepted = [i for i in analysis["issues"] if i["severity"] == "accepted"]
     lines: list[str] = []
 
     if audience == "customer":
@@ -417,6 +443,13 @@ def render(analysis: dict[str, Any], audience: Audience = "customer", job_name: 
         if audience == "prepress":
             for m in i["original_messages"][:3]:
                 lines.append(f"  > {m}")
+    if accepted:
+        lines.append("")
+        rule = analysis.get("customer_rule") or {}
+        lines.append("Accepted per customer agreement" + (f" ({rule['customer']})" if rule.get("customer") else "")
+                     + ": " + "; ".join(i["title"] for i in accepted))
+        if rule.get("notes"):
+            lines.append(f"  Note: {rule['notes']}")
     if fixed:
         lines.append("")
         lines.append("Already fixed: " + "; ".join(i["title"] for i in fixed))

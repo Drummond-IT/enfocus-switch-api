@@ -318,7 +318,7 @@ async def test_tool_compare_without_pace_needs_details(settings, fake):
     pdf.write_bytes(make_pdf([CMYK_BOX]))
     server = _server(settings, fake)
     r = await _call(server, "compare_file_to_ticket", {"file_path": str(pdf), "pace_job_number": "1"})
-    assert r.is_error and "Pace isn't connected" in r.content[0].text
+    assert r.is_error and "Pace database isn't connected" in r.content[0].text
     r = await _call(server, "compare_file_to_ticket", {"file_path": str(pdf), "trim": "8.5x11", "colors": "4/0"})
     assert r.structured_content["verdict"] == "matches_ticket"
 

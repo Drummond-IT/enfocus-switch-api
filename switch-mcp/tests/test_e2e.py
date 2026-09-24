@@ -25,7 +25,7 @@ ALL_TOOLS = {
     "submit_job", "route_job", "replace_job", "set_job_lock", "rush_job", "set_flow_running",
     # automations
     "compare_file_to_ticket", "pdf_facts", "draft_item_from_pdf", "plan_autofixes", "find_job_numbers",
-    "morning_digest", "approve_proof",
+    "morning_digest", "approve_proof", "validate_job_spec",
 }
 
 
@@ -205,8 +205,9 @@ def test_check_command(live):
     bad = _check(env_file, SWITCH_PASSWORD="nope")
     assert bad.returncode == 1 and "Wrong user name or password" in bad.stdout
 
-    env_file.chmod(0o644)
-    assert "readable by other users" in _check(env_file).stdout
+    if sys.platform != "win32":  # POSIX permission bits; Windows uses ACLs (not checked)
+        env_file.chmod(0o644)
+        assert "readable by other users" in _check(env_file).stdout
 
     down = _check(env_file, SWITCH_URL="http://127.0.0.1:9")
     assert down.returncode == 1 and "Could not reach Switch" in down.stdout
@@ -218,8 +219,9 @@ def test_check_reports_config_errors(tmp_path):
     env_file.chmod(0o600)
     r = _check(env_file)
     assert r.returncode == 2
-    for expected in ("SWITCH_URL must look like", "SWITCH_USERNAME is not set", "not a folder: /does/not/exist"):
+    for expected in ("SWITCH_URL must look like", "SWITCH_USERNAME is not set", "not a folder:"):
         assert expected in r.stdout
+    assert "exist" in r.stdout.split("not a folder:")[1].splitlines()[0]  # shown as /does/... or D:\does\...
 
 
 def test_version():
