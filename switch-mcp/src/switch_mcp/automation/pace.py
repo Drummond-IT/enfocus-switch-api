@@ -20,6 +20,7 @@ prompts in ``server.py`` show how to combine the two without this gateway.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -41,6 +42,8 @@ QUERY_CONTRACT: dict[str, list[str]] = {
                      "quantity", "price", "created"],
 }
 
+
+log = logging.getLogger("switch_mcp.pace")
 
 class PaceError(RuntimeError):
     pass
@@ -129,6 +132,10 @@ class PaceApiWriter:
                 raise PaceError(f"{path}: operation '{name}' is missing {', '.join(missing)}.")
             if str(op["method"]).upper() not in ("POST", "PUT", "PATCH"):
                 raise PaceError(f"{path}: operation '{name}' method must be POST, PUT or PATCH.")
+            content_type = str(op.get("content_type", "application/json")).lower()
+            if "json" not in content_type and "xml" not in content_type:
+                # Only JSON and XML bodies can be escaped safely; values come partly from customers.
+                raise PaceError(f"{path}: operation '{name}' content_type must be JSON or XML.")
         return data
 
     @property
@@ -181,7 +188,8 @@ class PaceApiWriter:
             raise PaceError(f"Pace API not reachable: {exc.__class__.__name__}") from exc
         if resp.status_code >= 400:
             self._audit(event | {"result": "failed", "http_status": resp.status_code})
-            raise PaceError(f"Pace API refused '{operation}' (HTTP {resp.status_code}): {resp.text[:200]}")
+            log.warning("Pace API refused %s (HTTP %s): %s", operation, resp.status_code, resp.text[:500])
+            raise PaceError(f"Pace API refused '{operation}' (HTTP {resp.status_code}); details are in the service log.")
         self._audit(event | {"result": "done", "http_status": resp.status_code})
         return {"ok": True, "http_status": resp.status_code}
 
@@ -218,7 +226,7 @@ class PacePostgresGateway:
             from psycopg.rows import dict_row
         except ImportError as exc:  # pragma: no cover - depends on the optional extra
             raise PaceNotConfigured("Install the Pace extra: uv tool install './switch-mcp[pace]'.") from exc
-        with psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False) as conn:
+        with psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False, connect_timeout=5) as conn:
             conn.read_only = True  # the session refuses writes even if the role could
             with conn.cursor() as cur:
                 cur.execute(f"SET LOCAL statement_timeout = {int(self.statement_timeout_ms)}")

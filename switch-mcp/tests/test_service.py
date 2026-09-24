@@ -283,3 +283,54 @@ def test_event_by_job_name(make_app, fake_pace):
         assert r.status_code == 404
         r = c.post("/switch/events", json={"event": "proof_sent"}, headers=auth())
         assert r.status_code == 400 and "job_id" in r.json()["error"]
+
+
+# ------------------------------------------------------------------ security regressions
+
+def test_match_job_long_whitespace_is_fast(make_app):
+    import time
+
+    with make_app() as c:
+        start = time.monotonic()
+        r = c.post("/switch/match-job", json={"text": "job" + " " * 4990 + "1"}, headers=auth())
+    assert r.status_code == 200 and time.monotonic() - start < 1
+
+
+def test_deeply_nested_json_is_a_400(make_app):
+    with make_app() as c:
+        r = c.post("/switch/match-job", content=b"[" * 60000, headers={**auth(), "Content-Type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_failed_auth_is_throttled_and_not_flooding_the_audit_log(make_app, tmp_path):
+    with make_app() as c:
+        codes = [c.post("/switch/match-job", json={}, headers={"X-API-Key": "guess"}).status_code for _ in range(35)]
+    assert codes[:30] == [401] * 30 and set(codes[30:]) == {429}
+    assert len((tmp_path / "audit.jsonl").read_text().splitlines()) == 30
+
+
+def test_preflight_page_cap(make_app, monkeypatch):
+    monkeypatch.setattr(service, "MAX_UPLOAD_PAGES", 2)
+    with make_app() as c:
+        r = upload(c, make_pdf([CMYK_BOX] * 3))
+    assert r.status_code == 413 and "3 pages" in r.json()["error"]
+
+
+async def test_parse_slot_held_until_thread_finishes(monkeypatch, settings, fake, api_keys):
+    import asyncio
+    import threading
+
+    monkeypatch.setattr(service, "PARSE_TIMEOUT", 0.05)
+    app = service.create_app(settings, SwitchClient(settings, transport=httpx.MockTransport(fake)), None, api_keys)
+    state = app.state.service
+    release = threading.Event()
+    with pytest.raises(service.ServiceError) as exc:
+        await state.parse(release.wait, 5)
+    assert exc.value.status == 422
+    assert state.parse_slots._value == service.PARALLEL_PARSES - 1  # still busy: the thread is running
+    release.set()
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if state.parse_slots._value == service.PARALLEL_PARSES:
+            break
+    assert state.parse_slots._value == service.PARALLEL_PARSES

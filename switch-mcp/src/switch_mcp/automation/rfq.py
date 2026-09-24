@@ -66,12 +66,15 @@ def _quantities(value: Any) -> list[int]:
         return [int(value)]
     if isinstance(value, (list, tuple)):
         return [q for v in value for q in _quantities(v)]
-    numbers = re.findall(r"\d[\d,]*(?:\.\d+)?\s*[kK]?", str(value))
+    numbers = re.findall(r"\d[\d,]{0,15}(?:\.\d{1,3})?\s?[kK]?", str(value)[:500])
     out = []
     for n in numbers:
         n = n.strip().replace(",", "")
-        out.append(int(float(n[:-1]) * 1000) if n.lower().endswith("k") else int(float(n)))
-    return out
+        try:
+            out.append(int(float(n[:-1]) * 1000) if n.lower().endswith("k") else int(float(n)))
+        except (ValueError, OverflowError):
+            continue
+    return [q for q in out if q < 10**9][:10]
 
 
 def validate_rfq(fields: dict[str, Any], today: date | None = None) -> dict[str, Any]:

@@ -24,6 +24,9 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=2G
+TasksMax=256
 UMask=0077
 
 [Install]

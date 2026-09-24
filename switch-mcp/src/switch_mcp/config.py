@@ -260,9 +260,9 @@ class Settings:
         if self.service_max_upload_mb <= 0 or self.service_rate_limit_per_min <= 0:
             errors.append("SERVICE_MAX_UPLOAD_MB and SERVICE_RATE_LIMIT_PER_MIN must be greater than 0.")
         if not _is_local(self.service_host) and not self.service_tls_cert:
-            warnings.append(f"The service listens on {self.service_host} without TLS: put it behind a reverse "
-                            "proxy with https (or set SERVICE_TLS_CERT / SERVICE_TLS_KEY); API keys travel in "
-                            "every request.")
+            warnings.append(f"The service listens on {self.service_host}: put it behind a reverse proxy with "
+                            "https and connection/header timeouts (nginx, IIS ARR). API keys travel in every "
+                            "request, and the service itself doesn't close idle connections.")
         if self.service_dry_run:
             warnings.append("SERVICE_DRY_RUN is on (default): the service plans changes but makes none.")
         if self.service_auto_route:

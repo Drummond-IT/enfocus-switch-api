@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import io
 import json
 import logging
 import re
@@ -55,7 +56,10 @@ log = logging.getLogger("switch_mcp.service")
 SCOPES = ("preflight", "switch_events", "match_job", "proof_approve", "rfq")
 MAX_JSON_BYTES = 64 * 1024
 PARSE_TIMEOUT = 60
-PARALLEL_PARSES = 2
+PARALLEL_PARSES = 2      # PDF parses at once (CPU bound)
+PARALLEL_UPLOADS = 4     # /preflight requests holding an upload in memory at once
+QUEUE_TIMEOUT = 10       # seconds to wait for a slot before answering 503
+MAX_UPLOAD_PAGES = 2000  # larger PDFs are refused before the (linear-cost) checks
 JOB_NUMBER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")
 EVENT_NAME = re.compile(r"[a-z0-9_]{1,40}")
 STATUS_RULE_KEYS = {"pace_status", "note", "explain", "auto_route"}
@@ -120,6 +124,8 @@ class RateLimiter:
 
     def allow(self, name: str, now: float | None = None) -> bool:
         now = time.monotonic() if now is None else now
+        if len(self.hits) > 10_000:  # keyed by client address for failed logins: keep memory bounded
+            self.hits = {k: q for k, q in self.hits.items() if q and now - q[-1] < 60}
         q = self.hits.setdefault(name, deque())
         while q and now - q[0] >= 60:
             q.popleft()
@@ -181,7 +187,7 @@ async def read_json(request: Request) -> dict[str, Any]:
         raise ServiceError(415, "Send JSON (Content-Type: application/json).")
     try:
         data = json.loads(await read_body(request, MAX_JSON_BYTES))
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ServiceError(400, "Body is not valid JSON.") from exc
     if not isinstance(data, dict):
         raise ServiceError(400, "Body must be a JSON object.")
@@ -223,6 +229,15 @@ def step(system: str, action: str, detail: str, status: str = "planned", result:
     return {"system": system, "action": action, "detail": detail, "status": status, "result": result}
 
 
+def count_pages(data: bytes) -> int:
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    if reader.is_encrypted:
+        reader.decrypt("")
+    return len(reader.pages)
+
+
 def customer_issue(issue: dict[str, Any]) -> dict[str, Any]:
     return {"title": issue["title"], "severity": issue["severity"], "pages": issue["pages"][:50],
             "what_to_do": issue["explanation"]["customer"]}
@@ -242,6 +257,8 @@ class ServiceState:
     audit: AuditLog
     limiter: RateLimiter
     parse_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(PARALLEL_PARSES))
+    upload_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(PARALLEL_UPLOADS))
+    failed_auth: RateLimiter = field(default_factory=lambda: RateLimiter(30))
 
     @property
     def pace_reader(self) -> PaceGateway | None:
@@ -269,15 +286,28 @@ class ServiceState:
             log.warning("Could not record preflight analytics: %s", exc)
 
     async def parse(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        async with self.parse_slots:
-            try:
-                return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=PARSE_TIMEOUT)
-            except asyncio.TimeoutError as exc:
-                raise ServiceError(422, f"Reading the file took longer than {PARSE_TIMEOUT} seconds.") from exc
-            except ServiceError:
-                raise
-            except Exception as exc:  # pypdf raises many types for damaged files
-                raise ServiceError(422, "The file could not be read as a PDF (damaged or not a PDF).") from exc
+        """Run a parse in a worker thread. The slot stays taken until the thread really finishes (a
+        thread can't be killed), so a slow file can't make more threads pile up after a timeout."""
+        try:
+            await asyncio.wait_for(self.parse_slots.acquire(), timeout=QUEUE_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise ServiceError(503, "Busy checking other files; try again in a minute.") from exc
+        task = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+
+        def done(t: asyncio.Future[Any]) -> None:
+            self.parse_slots.release()
+            if not t.cancelled():
+                t.exception()  # retrieved, so a late failure isn't reported as "never retrieved"
+
+        task.add_done_callback(done)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=PARSE_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise ServiceError(422, f"Reading the file took longer than {PARSE_TIMEOUT} seconds.") from exc
+        except ServiceError:
+            raise
+        except Exception as exc:  # pypdf raises many types for damaged files
+            raise ServiceError(422, "The file could not be read as a PDF (damaged or not a PDF).") from exc
 
 
 Handler = Callable[[Request, ApiKey, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -288,7 +318,11 @@ def endpoint(state: ServiceState, scope: str, handler: Handler) -> Callable[[Req
         audit: dict[str, Any] = {"endpoint": request.url.path, "scope": scope}
         key = state.authenticate(request)
         if key is None:
-            state.audit(audit | {"key": None, "status": 401})
+            client = request.client.host if request.client else "unknown"
+            if not state.failed_auth.allow(client):  # stop key guessing and audit-log flooding
+                return JSONResponse({"error": "Too many failed requests; try again in a minute."}, 429,
+                                    headers={"Retry-After": "60"})
+            state.audit(audit | {"key": None, "status": 401, "client": client})
             return JSONResponse({"error": "Missing or invalid API key."}, 401, headers={"WWW-Authenticate": "Bearer"})
         audit["key"] = key.name
         if scope not in key.scopes:
@@ -349,6 +383,19 @@ def create_app(settings: Settings, switch: SwitchClient | None = None, pace: Pac
             raise ServiceError(400, f"Ticket details not understood: {exc}") from exc
         if bleed is not None and not 0 <= bleed <= 1:
             raise ServiceError(400, "bleed_in must be between 0 and 1 inch.")
+        try:
+            await asyncio.wait_for(state.upload_slots.acquire(), timeout=QUEUE_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise ServiceError(503, "Busy checking other files; try again in a minute.") from exc
+        try:
+            return await preflight_checks(request, audit, name, customer, job_number, trim, bleed, pages)
+        finally:
+            state.upload_slots.release()
+
+    async def preflight_checks(request: Request, audit: dict[str, Any], name: str, customer: str | None,
+                               job_number: str | None, trim: tuple[float, float] | None, bleed: float | None,
+                               pages: int | None) -> dict[str, Any]:
+        q = request.query_params
         data = await read_body(request, settings.service_max_upload_mb * 1024 * 1024)
         if b"%PDF-" not in data[:1024]:
             raise ServiceError(415, "Upload a PDF file (the body must be the PDF itself).")
@@ -356,6 +403,10 @@ def create_app(settings: Settings, switch: SwitchClient | None = None, pace: Pac
 
         rule = state.rules.find(customer)
         required_bleed = bleed if bleed is not None else (rule.ticket_defaults.get("bleed_in") if rule else None)
+        page_count = await state.parse(count_pages, data)
+        if page_count > MAX_UPLOAD_PAGES:
+            raise ServiceError(413, f"The file has {page_count} pages; the online check handles up to "
+                                    f"{MAX_UPLOAD_PAGES}. Our prepress team will check it instead.")
         result = await state.parse(check_pdf, data, trim[0] if trim else None, trim[1] if trim else None,
                                    0.125 if required_bleed is None else required_bleed, name=name)
         parsed = preflight.ParsedReport("quick-check", {"file": name}, [
@@ -572,4 +623,4 @@ def run(settings: Settings) -> None:  # pragma: no cover - thin wrapper around u
     uvicorn.run(app, host=settings.service_host, port=settings.service_port, log_level="info",
                 server_header=False, date_header=False, proxy_headers=False,
                 ssl_certfile=settings.service_tls_cert or None, ssl_keyfile=settings.service_tls_key or None,
-                limit_concurrency=64, timeout_keep_alive=5)
+                timeout_keep_alive=5)

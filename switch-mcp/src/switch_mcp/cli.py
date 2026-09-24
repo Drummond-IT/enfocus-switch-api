@@ -226,9 +226,11 @@ def run_service_key(settings: Settings, name: str | None, scopes: str | None) ->
         print(f"Replacing the existing key '{name}' (the old key stops working when the service restarts).")
     data.update(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp = path.with_name(f".{path.name}.tmp")  # write a new file, then swap it in: never a half-written keys file
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
     print(f"Saved the key's hash to {path}. Restart the service to use it.")
     return 0
 

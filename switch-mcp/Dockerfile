@@ -15,9 +15,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
+# Dependencies come from requirements.lock (exported from uv.lock, with hashes), so builds are reproducible.
+# Regenerate after changing dependencies:
+#   uv export --frozen --no-dev --extra pace --no-emit-project -o requirements.lock
+COPY requirements.lock ./
+RUN pip install --require-hashes -r requirements.lock
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install ".[pace]" \
+RUN pip install --no-deps . \
     && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin switchmcp \
     && mkdir -p /data \
     && chown switchmcp /data
@@ -34,7 +39,7 @@ USER switchmcp
 EXPOSE 8765
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=4).status == 200 else 1)"
+    CMD python -c "import os,ssl,sys,urllib.request as u; tls=bool(os.environ.get('SERVICE_TLS_CERT')); ctx=ssl._create_unverified_context() if tls else None; url=('https' if tls else 'http')+'://127.0.0.1:'+os.environ.get('SERVICE_PORT','8765')+'/health'; sys.exit(0 if u.urlopen(url, timeout=4, context=ctx).status == 200 else 1)"
 
 ENTRYPOINT ["enfocus-switch-mcp"]
 CMD ["service"]

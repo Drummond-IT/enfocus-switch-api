@@ -183,7 +183,9 @@ server {
 }
 ```
 
-Alternatively set `SERVICE_TLS_CERT` and `SERVICE_TLS_KEY` to serve https directly.
+Alternatively set `SERVICE_TLS_CERT` and `SERVICE_TLS_KEY` to serve https directly, but only for callers on
+the same trusted network. The service doesn't time out idle connections itself; the proxy does
+(nginx: `client_header_timeout` / `client_body_timeout`, IIS: connection timeout).
 
 ---
 
@@ -205,6 +207,7 @@ HTTP status:
 | 422 | File unreadable |
 | 429 | Rate limit |
 | 502 | Switch unreachable |
+| 503 | Busy (too many files being checked); retry after a short wait |
 
 ### 4.1 Switch flows → `POST /switch/events` (D1, B2, A3)
 

@@ -44,3 +44,8 @@ async def test_tool_validate_job_spec(make_server):
         r = await c.call_tool("validate_job_spec", {"product": "flyer", "quantity": "1000", "trim": "8.5x11",
                                                     "colors": "4/0"})
     assert r.structured_content["missing"] == ["stock"]
+
+
+def test_huge_numbers_do_not_crash():
+    r = validate_rfq({"quantity": "9" * 400, "pages": 8})
+    assert r["spec"].get("quantity") is None or r["spec"]["quantity"] < 10**9

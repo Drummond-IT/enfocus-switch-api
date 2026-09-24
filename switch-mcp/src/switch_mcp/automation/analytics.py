@@ -14,6 +14,7 @@ time: send them the image guide") and to see whether things improve.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections import Counter
 from contextlib import closing
@@ -41,8 +42,11 @@ CREATE INDEX IF NOT EXISTS preflight_events_customer ON preflight_events(custome
 
 
 def _connect(path: str | Path) -> sqlite3.Connection:
-    Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(Path(path).expanduser()), timeout=10)
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():  # customer names and job numbers: owner-only, whatever the umask
+        os.close(os.open(p, os.O_WRONLY | os.O_CREAT, 0o600))
+    conn = sqlite3.connect(str(p), timeout=10)
     conn.executescript(SCHEMA)
     return conn
 

@@ -164,3 +164,23 @@ def test_settings_validate_pace_write(tmp_path):
     assert not errors and any("not https" in w for w in warnings) and any("Pace writes are ON" in w for w in warnings)
     assert Settings.from_env({"PACE_ALLOW_WRITE": "yes", "PACE_ALLOWED_STATUSES": "A,B"}).pace_env()[
         "PACE_ALLOWED_STATUSES"] == "A,B"
+
+
+def test_form_bodies_are_refused_and_pace_error_text_is_not_returned(tmp_path):
+    cfg = tmp_path / "p.json"
+    cfg.write_text(json.dumps({"operations": {"add_job_note": {
+        "method": "POST", "path": "/n", "content_type": "application/x-www-form-urlencoded", "body": "note={note}"}}}))
+    with pytest.raises(pace.PaceError, match="JSON or XML"):
+        pace.PaceApiWriter.load_config(cfg)
+    w, _, _ = writer(status=500)
+    with pytest.raises(pace.PaceError) as exc:
+        w.add_job_note("1", "x")
+    assert "nope" not in str(exc.value)
+
+
+def test_analytics_db_is_private(tmp_path):
+    from switch_mcp.automation import analytics
+
+    db = tmp_path / "a.sqlite"
+    analytics.record(db, {"issues": [], "verdict": "ready", "counts": {}}, "tool")
+    assert sys.platform == "win32" or db.stat().st_mode & 0o077 == 0
