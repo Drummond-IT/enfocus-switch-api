@@ -30,3 +30,45 @@ jobs:
         run: uv run --extra dev ruff check src tests
       - name: Unit and end-to-end tests
         run: uv run --extra dev pytest -q
+
+  windows:
+    # Informational: many Switch servers run Windows. Failures here are reported, not blocking,
+    # until the test suite has been validated on Windows (see docs/handoff/test-plan.md).
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: switch-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Unit and end-to-end tests
+        run: uv run --extra dev pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: switch-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the service image
+        run: docker build -t enfocus-switch-mcp:ci .
+      - name: Smoke test (health, auth, one endpoint)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cfg"
+          KEY=$(docker run --rm enfocus-switch-mcp:ci service-key --name ci --scopes rfq | grep -o 'swk_[A-Za-z0-9_-]*')
+          python3 -c "import hashlib,json,sys; json.dump({'ci': {'sha256': hashlib.sha256(sys.argv[1].encode()).hexdigest(), 'scopes': ['rfq']}}, open(sys.argv[2], 'w'))" "$KEY" "$RUNNER_TEMP/cfg/keys.json"
+          chmod 644 "$RUNNER_TEMP/cfg/keys.json"
+          printf 'SWITCH_URL=http://switch.invalid:51088\nSWITCH_USERNAME=ci\nSWITCH_PASSWORD=ci\nSERVICE_KEYS_FILE=/config/keys.json\n' > "$RUNNER_TEMP/env"
+          docker run -d --name svc -p 127.0.0.1:8765:8765 --env-file "$RUNNER_TEMP/env" -v "$RUNNER_TEMP/cfg:/config:ro" enfocus-switch-mcp:ci
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:8765/health && break; sleep 1; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8765/rfq/validate -H 'Content-Type: application/json' -d '{}')" = 401
+          curl -fs -X POST http://127.0.0.1:8765/rfq/validate -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+            -d '{"product": "flyer", "quantity": 500}' | grep -q '"missing"'
+      - name: Service log
+        if: always()
+        run: docker logs svc || true

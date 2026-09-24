@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -128,7 +129,7 @@ def test_audit_log_file(tmp_path):
     log({"action": "y"})
     lines = [json.loads(line) for line in (tmp_path / "a" / "audit.jsonl").read_text().splitlines()]
     assert [r["action"] for r in lines] == ["x", "y"] and lines[0]["actor"] == "test"
-    assert (tmp_path / "a" / "audit.jsonl").stat().st_mode & 0o077 == 0
+    assert sys.platform == "win32" or (tmp_path / "a" / "audit.jsonl").stat().st_mode & 0o077 == 0
 
 
 async def test_approve_proof_with_real_writer(client, fake):

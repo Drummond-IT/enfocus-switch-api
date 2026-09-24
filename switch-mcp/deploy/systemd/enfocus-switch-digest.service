@@ -1,0 +1,18 @@
+# Posts the morning digest to DIGEST_WEBHOOK_URL. Triggered by enfocus-switch-digest.timer.
+[Unit]
+Description=Enfocus Switch morning digest (Drummond)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=switchmcp
+Group=switchmcp
+Environment=SWITCH_ENV_FILE=/etc/enfocus-switch-mcp/config.env
+ExecStart=/opt/enfocus-switch-mcp/bin/enfocus-switch-mcp digest --post --hours 16
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/enfocus-switch-mcp
+UMask=0077

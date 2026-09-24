@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import httpx
 import pytest
@@ -261,7 +262,7 @@ def test_cli_service_key_writes_hashed_private_file(tmp_path, capsys):
     key = next(w for w in capsys.readouterr().out.split() if w.startswith("swk_"))
     stored = json.loads(keys.read_text())
     assert stored["portal"]["sha256"] == service.hash_key(key) and key not in keys.read_text()
-    assert keys.stat().st_mode & 0o077 == 0
+    assert sys.platform == "win32" or keys.stat().st_mode & 0o077 == 0
     assert cli.run_service_key(settings, "portal", "admin") == 2
 
 

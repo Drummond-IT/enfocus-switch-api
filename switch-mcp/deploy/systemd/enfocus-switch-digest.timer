@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Enfocus Switch digest on weekday mornings
+
+[Timer]
+# 6:30 local time, Monday-Friday. Adjust to the prepress shift start.
+OnCalendar=Mon..Fri 06:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
