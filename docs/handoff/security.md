@@ -76,7 +76,7 @@
    | Form/plain-text Pace bodies can't be escaped | Only JSON/XML content types accepted |
    | Pace error pages were echoed to callers | Only the HTTP status is returned; the body goes to the service log |
    | Analytics DB readable by others; keys file written non-atomically | Created 0600; the keys file is written to a temp file and swapped in |
-   | Unpinned image dependencies; the HEALTHCHECK broke with TLS; missing systemd limits | `requirements.lock` with hashes (checked in CI); TLS-aware health check; memory/task/address-family limits |
+   | Unpinned image dependencies; the HEALTHCHECK broke with TLS; missing systemd limits | hashed requirements exported from `uv.lock` during the image build; TLS-aware health check; memory/task/address-family limits |
 
 ## Remaining risks and decisions for Drummond
 
