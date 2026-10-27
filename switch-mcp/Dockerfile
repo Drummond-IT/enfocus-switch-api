@@ -7,6 +7,16 @@
 #     -v /etc/enfocus-switch-mcp:/etc/enfocus-switch-mcp:ro -v enfocus-data:/data enfocus-switch-mcp
 #
 # See docs/handoff/deployment.md for the full procedure.
+
+# Stage 1: export pinned, hashed requirements from uv.lock (the single source of truth,
+# kept current by Dependabot), so the image installs exactly what CI tested.
+FROM ghcr.io/astral-sh/uv:0.9 AS uv
+FROM python:3.12-slim AS lock
+COPY --from=uv /uv /bin/uv
+WORKDIR /src
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev --extra pace --no-emit-project -o /requirements.lock
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -15,10 +25,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
-# Dependencies come from requirements.lock (exported from uv.lock, with hashes), so builds are reproducible.
-# Regenerate after changing dependencies:
-#   uv export --frozen --no-dev --extra pace --no-emit-project -o requirements.lock
-COPY requirements.lock ./
+COPY --from=lock /requirements.lock ./
 RUN pip install --require-hashes -r requirements.lock
 COPY pyproject.toml README.md ./
 COPY src ./src
