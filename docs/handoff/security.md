@@ -91,4 +91,4 @@
 | Switch HTTP request elements may not support custom headers in your version | Documented alternatives (script element, proxy rule) | Choose one during phase 4 and record it in the runbook |
 | Portal integration security depends on the portal | Deployment guide: server-to-server only, key in the portal's secret store | Portal developer confirms in UAT A2 |
 | Windows test coverage is informational in CI | The tests pass on Linux/macOS; Windows paths are handled in code | Run the suite on the Windows hosts before go-live (test plan §1) |
-| Example dependencies in the older PHP sample (`composer.lock`: Guzzle 6.3.3, psr7 1.5.2) have known CVEs | The PHP sample isn't part of this deployment | Upgrade it or delete it (backlog) |
+| The older PHP sample (`composer.json`) | Upgraded to Guzzle 7 on 2026-10-27; `composer audit` is clean | Keep it updated, or delete it if nobody uses it |

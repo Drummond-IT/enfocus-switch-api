@@ -90,8 +90,9 @@ Status meanings:
 ## Tracking
 
 The backlog in [backlog.md](backlog.md) is organised as Asana-ready sections and tasks. Each task has
-an owner role and acceptance criteria. When the team is ready to start, load it into an Asana project,
-one section per phase. From then on, track progress there rather than in these files. Keep these
+an owner role and acceptance criteria. It is loaded into the Asana project
+[Switch + Pace Automation Rollout (AI connector)](https://app.asana.com/1/1141395546709776/project/1219942500250290)
+(Technology team), one section per phase. Track progress there rather than in these files. Keep these
 documents as the reference; update them when the design changes.
 
 ## Verification done before handoff

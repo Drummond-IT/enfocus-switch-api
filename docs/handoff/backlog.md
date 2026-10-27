@@ -1,7 +1,7 @@
 # Backlog
 
 Every remaining task to take the connector and the automation service live. It is organised to load
-straight into Asana:
+straight into Asana (now loaded: https://app.asana.com/1/1141395546709776/project/1219942500250290):
 - **one section per phase**, matching [rollout.md](rollout.md);
 - **one task per heading**, with the owner role, dependencies and acceptance criteria as the description
   and checklist.
@@ -51,6 +51,8 @@ Task IDs (e.g. `P1-03`) are for cross-references. Put them in the Asana task nam
   - [ ] Failures are fixed or logged as tasks.
 
 ### P0-06 Decide on the PHP sample dependencies (Dependabot alerts)
+
+**Done 2026-10-27:** upgraded to Guzzle 7; `composer audit` reports no advisories.
 - **Owner:** IT
 - **Acceptance:**
   - [ ] Either upgrade Guzzle/psr7 in `composer.json` and test the PHP sample, or delete the PHP sample
