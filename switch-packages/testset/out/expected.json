@@ -1,0 +1,98 @@
+[
+  {
+    "file": "01-clean-letter-bleed.pdf",
+    "defect": "none",
+    "category": null,
+    "severity": "pass",
+    "autofix": false,
+    "notes": "Must pass with no errors or warnings."
+  },
+  {
+    "file": "02-rgb-image.pdf",
+    "defect": "RGB image, 300 ppi",
+    "category": "rgb_color",
+    "severity": "warning",
+    "autofix": true,
+    "notes": "Auto-fix converts to press CMYK."
+  },
+  {
+    "file": "03-rgb-vector.pdf",
+    "defect": "RGB vector fill",
+    "category": "rgb_color",
+    "severity": "warning",
+    "autofix": true,
+    "notes": "Auto-fix converts to press CMYK."
+  },
+  {
+    "file": "04-no-bleed.pdf",
+    "defect": "Background to the trim, no bleed",
+    "category": "missing_bleed",
+    "severity": "warning",
+    "autofix": true,
+    "notes": "Auto-fix mirrors 0.125 in bleed; prepress reviews."
+  },
+  {
+    "file": "05-low-res-96ppi.pdf",
+    "defect": "96 ppi image, full page, RGB, no bleed",
+    "category": "low_resolution",
+    "severity": "error",
+    "autofix": false,
+    "notes": "Customer must supply a larger image; RGB and bleed also reported."
+  },
+  {
+    "file": "06-font-not-embedded.pdf",
+    "defect": "Montserrat-Regular not embedded",
+    "category": "fonts_not_embedded",
+    "severity": "error",
+    "autofix": false,
+    "notes": "Customer re-exports with fonts embedded (PDF/X-4)."
+  },
+  {
+    "file": "07-hairline-0.1pt.pdf",
+    "defect": "0.1 pt line",
+    "category": "thin_lines",
+    "severity": "warning",
+    "autofix": true,
+    "notes": "Auto-fix thickens to 0.25 pt."
+  },
+  {
+    "file": "08-white-overprint.pdf",
+    "defect": "White fill set to overprint",
+    "category": "overprint",
+    "severity": "warning",
+    "autofix": true,
+    "notes": "Auto-fix removes white overprint."
+  },
+  {
+    "file": "09-wrong-size-8.25x10.75.pdf",
+    "defect": "Trim 8.25 x 10.75 in on a letter job",
+    "category": "page_size",
+    "severity": "error",
+    "autofix": false,
+    "notes": "Fails against a letter job spec; scale-to-trim is a review fix only."
+  },
+  {
+    "file": "10-crop-marks-no-trimbox.pdf",
+    "defect": "Crop marks drawn, no TrimBox, media 9.5 x 12 in",
+    "category": "page_size",
+    "severity": "warning",
+    "autofix": true,
+    "notes": "Auto-fix sets TrimBox from crop marks and removes the marks; prepress reviews."
+  },
+  {
+    "file": "11-mixed-page-sizes.pdf",
+    "defect": "Page 2 is 5.5 x 8.5 in",
+    "category": "page_size",
+    "severity": "error",
+    "autofix": false,
+    "notes": "Customer fixes page setup."
+  },
+  {
+    "file": "12-registration-black-text.pdf",
+    "defect": "6 pt text in 400% black",
+    "category": "registration_black",
+    "severity": "warning",
+    "autofix": true,
+    "notes": "Auto-fix sets small black text to 100K."
+  }
+]

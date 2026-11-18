@@ -1,0 +1,8 @@
+{
+  "name": "drummond-preflight-testset",
+  "private": true,
+  "type": "module",
+  "description": "Makes the PDF test set for the Drummond portal preflight and auto-fix flows (see ../README.md).",
+  "scripts": { "make": "node make-testset.mjs" },
+  "dependencies": { "@pdf-lib/fontkit": "1.1.1", "pdf-lib": "1.17.1" }
+}
