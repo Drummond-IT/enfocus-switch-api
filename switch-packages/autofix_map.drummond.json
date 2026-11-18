@@ -1,0 +1,11 @@
+{
+  "_comment": "Drummond's auto-fix map for switch-mcp (SWITCH_AUTOFIX_MAP), matching autofix-action-list.md. route_to is the outgoing connection of the preflight checkpoint that leads to the Portal auto-fix branch.",
+  "rgb_color":          {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: RGB and Lab to CMYK"},
+  "overprint":          {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: remove white overprint"},
+  "thin_lines":         {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: lines to 0.25 pt"},
+  "registration_black": {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: small black text to 100K"},
+  "ink_coverage":       {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: total ink 300%"},
+  "output_intent":      {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: house output intent"},
+  "missing_bleed":      {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: mirror 0.125 in bleed", "needs_review": true},
+  "page_size":          {"route_to": "Auto-fix", "action_list": "Drummond Portal Auto-fix: trim from crop marks", "needs_review": true}
+}
