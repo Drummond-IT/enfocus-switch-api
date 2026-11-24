@@ -81,10 +81,32 @@ function Invoke-PitStop($in, $out, $report, [string[]]$mutators, $taskReport) {
   return $p.ExitCode
 }
 
-# Page previews of the first pages, PNG, via the CLI's PDF-to-image option.
+# Page previews, PNG, 800 px wide, showing the bleed box, via the CLI's PDF-to-image task. Checking and rendering can't
+# share one CLI run (error 103), so this is a second run. The CLI has no page range, so every page renders (small and
+# fast) and the first few are sent.
 function Get-Previews($pdf, $dir) {
   $pattern = Join-Path $dir 'preview_%1.png'
-  $p = Start-Process -FilePath $cfg.cli -ArgumentList @('-input', "`"$pdf`"", '-outputImage', "`"$pattern`"", '-imageType', 'PNG') -Wait -PassThru -NoNewWindow `
+  $xml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<cf:Configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:cf="http://www.enfocus.com/PitStop/25.03/PitStopServerCLI_Configuration.xsd">
+  <cf:Versioning><cf:Version>15</cf:Version><cf:VersioningStrategy>BestEffort</cf:VersioningStrategy></cf:Versioning>
+  <cf:Initialize><cf:ProcessingMethod>EnforceInternal</cf:ProcessingMethod></cf:Initialize>
+  <cf:ExportImage>
+    <cf:InputPDF><cf:InputPath>$(Esc $pdf)</cf:InputPath></cf:InputPDF>
+    <cf:OutputImages><cf:OutputPath>$(Esc $pattern)</cf:OutputPath><cf:SaveOptions FileType="PNG"><cf:Interlaced>false</cf:Interlaced></cf:SaveOptions></cf:OutputImages>
+    <cf:RenderOptions>
+      <cf:RenderType>Composite</cf:RenderType>
+      <cf:RenderArea>BleedBox</cf:RenderArea>
+      <cf:ImageDimensions><cf:Width>800</cf:Width></cf:ImageDimensions>
+      <cf:IncludeEmptyPages>true</cf:IncludeEmptyPages>
+      <cf:AntiAliasing>true</cf:AntiAliasing>
+    </cf:RenderOptions>
+  </cf:ExportImage>
+</cf:Configuration>
+"@
+  $cfgFile = Join-Path $dir 'preview.xml'
+  [IO.File]::WriteAllText($cfgFile, $xml, (New-Object Text.UTF8Encoding $false))
+  $p = Start-Process -FilePath $cfg.cli -ArgumentList @('-config', "`"$cfgFile`"") -Wait -PassThru -NoNewWindow `
     -RedirectStandardError (Join-Path $dir 'preview-stderr.txt') -RedirectStandardOutput (Join-Path $dir 'preview-stdout.txt')
   if ($p.ExitCode -ne 0) { return @() }
   Get-ChildItem $dir -Filter 'preview_*.png' | Sort-Object { [int]($_.BaseName -replace '\D', '') } | Select-Object -First ([int]$cfg.maxPreviews)

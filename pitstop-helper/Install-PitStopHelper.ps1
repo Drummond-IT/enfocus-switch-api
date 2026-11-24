@@ -68,7 +68,11 @@ if ($Remove) {
 }
 
 if ($Install) {
-  if (-not $Profile) { throw 'Pass -Profile with the full path of the .ppp to use (see -Check output).' }
+  $res = Join-Path (Split-Path (Find-Cli)) 'Resources'
+  # Starting picks (2026-11-24) until the Drummond profile and action list exist: Enfocus's Generic Press profile and
+  # its Convert all RGB to CMYK action list.
+  if (-not $Profile) { $Profile = Join-Path $res 'PDF Profiles\Generic Enfocus Preflight Profiles\Generic Press.ppp' }
+  if (-not $ActionList) { $ActionList = Join-Path $res 'Action Lists\Color\Convert all RGB to CMYK.eal' }
   if (-not (Test-Path $Profile)) { throw "Profile not found: $Profile" }
   if ($ActionList -and -not (Test-Path $ActionList)) { throw "Action list not found: $ActionList" }
   $cli = Find-Cli

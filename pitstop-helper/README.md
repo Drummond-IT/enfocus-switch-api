@@ -33,8 +33,9 @@ Steps 1 and 2 change nothing. Steps 3 and 4 need Chris's go.
 2. Run the check, and paste its output back into the thread:
    `powershell -ExecutionPolicy Bypass -File .\Install-PitStopHelper.ps1 -Check`
    It shows the CLI version, the standard profiles and action lists, a test run, and whether the portal is reachable.
-3. Install, with the profile chosen from the check:
-   `powershell -ExecutionPolicy Bypass -File .\Install-PitStopHelper.ps1 -Install -Profile "<path>.ppp" -ActionList "<path>.eal"`
+3. Install: `powershell -ExecutionPolicy Bypass -File .\Install-PitStopHelper.ps1 -Install`
+   With no `-Profile` or `-ActionList`, it uses Enfocus's Generic Press profile and the Convert all RGB to CMYK action
+   list. Both ship with PitStop Server.
    It asks for the portal secret (the person installing types it), stores it encrypted for that machine only, and adds
    the scheduled task "Drummond PitStop helper". The task runs as SYSTEM at startup.
 4. Later, when the custom "Drummond Portal Preflight" profile and "Drummond Portal Auto-fix" action list are built in
@@ -52,3 +53,10 @@ Everything lives in `C:\ProgramData\DrummondPitStopHelper` (SYSTEM and Administr
 | `secret.bin` | The portal secret, encrypted with machine-scope DPAPI |
 | `helper.log` | The log, rolled over at 5 MB |
 | `work\` | One folder per job, deleted when the job is done |
+
+## Checked on switch03 (2026-11-24)
+
+- The CLI is `C:\Program Files\Enfocus\Enfocus PitStop Server 26\PitStopServerCLI.exe`, 26.03 Build 1664209.
+- The JSON report has `preflightReport.errors.preflightReportItem[].message`, which `summariseReport()` reads as it is.
+- Checking and rendering images in one CLI run fails with error 103, so previews are a second run.
+- switch03 reaches the test portal over HTTPS.
