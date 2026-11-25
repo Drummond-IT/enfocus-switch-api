@@ -19,9 +19,10 @@ same. No port, share, firewall or Switch change is needed.
 
 | Call | What it does |
 |---|---|
-| `GET /api/pitstop/next` | `204` when nothing waits. Otherwise `{ id, name, mode: "check" \| "fix", file }`, where `file` is a download URL |
+| `GET /api/pitstop/next` | `204` when nothing waits. Otherwise `{ id, name, mode: "check" \| "fix" \| "tool", tool?, file }`, where `file` is a download URL. Each poll sends `X-Helper-Tools` (the tools set up in `config.json`) |
+| `GET /api/pitstop/helper-script` | The current helper script, for `-SelfUpdate` |
 | `GET <file>` | The file's bytes |
-| `POST /api/pitstop/result?id=…` | Multipart: `status` (`ok` or `error`), `message`, `report` (JSON), `fixed` (PDF), `preview1..4` (PNG) |
+| `POST /api/pitstop/result?id=…` | Multipart: `status` (`ok` or `error`), `message`, `report` (JSON), `fixed` (PDF), `preview1..4` (PNG), `pages` (one letter per page: `c` color, `k` black only, `w` empty) |
 
 Every call sends `Authorization: Bearer <PITSTOP_HELPER_SECRET>`.
 
@@ -42,6 +43,27 @@ Steps 1 and 2 change nothing. Steps 3 and 4 need Chris's go.
    PitStop Pro on switch03 (specs in `../switch-packages/`), run `-Install` again with their paths.
 
 To undo everything: `-Remove`.
+
+## Client file tools (F-1494, F-1499)
+
+The portal's file tools that need PitStop (print-ready PDF/X-4, grayscale, one color) run action lists named in
+`config.json` under `tools`, for example:
+
+```json
+"tools": {
+  "printready": ["C:\\ProgramData\\DrummondPitStopHelper\\tools\\printready.eal"],
+  "grayscale": ["C:\\ProgramData\\DrummondPitStopHelper\\tools\\grayscale.eal"],
+  "onecolor": ["C:\\ProgramData\\DrummondPitStopHelper\\tools\\onecolor.eal"]
+}
+```
+
+The portal offers a tool only after the helper reports it. New action lists are copies kept in the helper's own
+`tools` folder; the existing PitStop resources are never changed.
+
+## Updating the helper
+
+`powershell -ExecutionPolicy Bypass -File .\PitStopHelper.ps1 -SelfUpdate` downloads the script from the portal,
+keeps the old copy as `PitStopHelper.ps1.before-update` and restarts the task.
 
 ## Files on switch03
 

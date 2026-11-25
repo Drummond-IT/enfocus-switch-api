@@ -5,19 +5,25 @@
 #
 # Portal side (to build in wavelength-dashboard):
 #   GET  {portal}/api/pitstop/next            -> 204 when nothing waits, else JSON
-#        { "id": "...", "name": "flyer.pdf", "mode": "check" | "fix", "file": "https://.../download" }
+#        { "id": "...", "name": "flyer.pdf", "mode": "check" | "fix" | "tool", "tool": "printready", "file": "https://.../download" }
+#        A tool job (client file tools, F-1494 and F-1499) runs the action lists under config "tools" for that tool name.
 #   GET  {file}                                -> the file bytes (same bearer secret)
 #   POST {portal}/api/pitstop/result?id=...    multipart: status (ok|error), message, report (report.json),
-#                                              fixed (fixed.pdf, fix jobs only), preview1..previewN (PNG, first pages)
+#                                              fixed (fixed.pdf, fix and tool jobs), preview1..previewN (PNG, first pages),
+#                                              pages (one letter a page: c color, k black only, w empty; F-1498)
 #   Every call sends Authorization: Bearer <secret>. The report is PitStop's JSON report, which the portal already
 #   reads with summariseReport() in src/switch.js.
 #
 # Run:  powershell -ExecutionPolicy Bypass -File PitStopHelper.ps1 [-Once] [-ConfigPath <path>]
+# Update: powershell -ExecutionPolicy Bypass -File C:\ProgramData\DrummondPitStopHelper\PitStopHelper.ps1 -SelfUpdate
+#   fetches this script from the portal (GET /api/pitstop/helper-script, same secret), keeps the old copy as
+#   PitStopHelper.ps1.before-update and restarts the task. Undo: copy that file back and restart the task.
 # Config: C:\ProgramData\DrummondPitStopHelper\config.json (written by Install-PitStopHelper.ps1).
 
 param(
   [string]$ConfigPath = "$env:ProgramData\DrummondPitStopHelper\config.json",
-  [switch]$Once
+  [switch]$Once,
+  [switch]$SelfUpdate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,8 +52,24 @@ function Get-Secret {
 $client = New-Object System.Net.Http.HttpClient
 $client.Timeout = [TimeSpan]::FromMinutes(10)
 $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', (Get-Secret))
-$client.DefaultRequestHeaders.UserAgent.ParseAdd('DrummondPitStopHelper/1')
+$client.DefaultRequestHeaders.UserAgent.ParseAdd('DrummondPitStopHelper/2')
+# The PitStop tools set up here (config "tools"), named on every poll so the portal offers only those (F-1494, F-1499).
+$toolNames = if ($cfg.tools) { ($cfg.tools.PSObject.Properties | ForEach-Object { $_.Name }) -join ',' } else { '' }
+if ($toolNames) { $client.DefaultRequestHeaders.Add('X-Helper-Tools', $toolNames) }
 $portal = $cfg.portalUrl.TrimEnd('/')
+
+if ($SelfUpdate) {
+  $new = $client.GetStringAsync("$portal/api/pitstop/helper-script").Result
+  if ($new.Length -lt 2000 -or $new -notmatch '# PitStop helper for Drummond One') { throw 'The portal did not send the helper script.' }
+  $me = $PSCommandPath
+  Copy-Item -Force $me "$me.before-update"
+  [IO.File]::WriteAllText($me, $new, (New-Object Text.UTF8Encoding $false))
+  Write-Log "helper updated from the portal ($($new.Length) characters); restarting the task"
+  Stop-ScheduledTask -TaskName 'Drummond PitStop helper' -ErrorAction SilentlyContinue
+  Start-ScheduledTask -TaskName 'Drummond PitStop helper'
+  "Updated. The old copy is $me.before-update"
+  return
+}
 
 function Esc([string]$s) { [Security.SecurityElement]::Escape($s) }
 
@@ -109,13 +131,40 @@ function Get-Previews($pdf, $dir) {
   $p = Start-Process -FilePath $cfg.cli -ArgumentList @('-config', "`"$cfgFile`"") -Wait -PassThru -NoNewWindow `
     -RedirectStandardError (Join-Path $dir 'preview-stderr.txt') -RedirectStandardOutput (Join-Path $dir 'preview-stdout.txt')
   if ($p.ExitCode -ne 0) { return @() }
-  Get-ChildItem $dir -Filter 'preview_*.png' | Sort-Object { [int]($_.BaseName -replace '\D', '') } | Select-Object -First ([int]$cfg.maxPreviews)
+  Get-ChildItem $dir -Filter 'preview_*.png' | Sort-Object { [int]($_.BaseName -replace '\D', '') }
 }
 
-function Send-Result($id, $status, $message, $files) {
+# F-1498: what each rendered page holds, one letter a page: c (some color), k (black and grays only) or w (empty).
+# Every 6th pixel each way is read; a pixel is color when its channels differ by more than 40, ink when its darkest
+# channel is under 245. A page needs 0.1% color samples to count as color and 0.05% ink samples not to be empty, so
+# anti-aliasing and a stray speck don't count.
+function Get-PageColors($pngs) {
+  Add-Type -AssemblyName System.Drawing
+  $out = ''
+  foreach ($png in $pngs) {
+    $bmp = [System.Drawing.Bitmap]::FromFile($png.FullName)
+    try {
+      $n = 0; $color = 0; $ink = 0
+      for ($y = 0; $y -lt $bmp.Height; $y += 6) {
+        for ($x = 0; $x -lt $bmp.Width; $x += 6) {
+          $p = $bmp.GetPixel($x, $y); $n++
+          $hi = [Math]::Max($p.R, [Math]::Max($p.G, $p.B)); $lo = [Math]::Min($p.R, [Math]::Min($p.G, $p.B))
+          if ($hi - $lo -gt 40) { $color++ }
+          if ($lo -lt 245) { $ink++ }
+        }
+      }
+      $ch = if ($n -and $color / $n -ge 0.001) { 'c' } elseif ($n -and $ink / $n -ge 0.0005) { 'k' } else { 'w' }
+      $out += $ch
+    } finally { $bmp.Dispose() }
+  }
+  $out
+}
+
+function Send-Result($id, $status, $message, $files, $fields = @{}) {
   $form = New-Object System.Net.Http.MultipartFormDataContent
   $form.Add((New-Object System.Net.Http.StringContent $status), 'status')
   $form.Add((New-Object System.Net.Http.StringContent ([string]$message)), 'message')
+  foreach ($k in $fields.Keys) { $form.Add((New-Object System.Net.Http.StringContent ([string]$fields[$k])), $k) }
   foreach ($k in $files.Keys) {
     $path = $files[$k]
     if (-not $path -or -not (Test-Path $path)) { continue }
@@ -136,9 +185,21 @@ function Invoke-Job($job) {
     $report = Join-Path $dir 'report.json'
     $task = Join-Path $dir 'task.xml'
     $fix = $job.mode -eq 'fix'
-    $out = if ($fix) { Join-Path $dir 'fixed.pdf' } else { $null }
+    $tool = $job.mode -eq 'tool'
+    $out = if ($fix -or $tool) { Join-Path $dir 'fixed.pdf' } else { $null }
     $mutators = @()
     if ($fix) { $mutators += $cfg.actionList }
+    if ($tool) {
+      # The tool's action lists (config "tools", one array per tool name). A tool that isn't set up here is an error,
+      # so the customer is told rather than given an unchanged copy.
+      $lists = if ($cfg.tools) { $cfg.tools.($job.tool) } else { $null }
+      if (-not $lists) {
+        Send-Result $job.id 'error' "The $($job.tool) tool isn't set up on the PitStop server." @{}
+        Write-Log "job $($job.id) tool $($job.tool) not set up"
+        return
+      }
+      $mutators += $lists
+    }
     $mutators += $cfg.profile
     $code = Invoke-PitStop $in $out $report $mutators $task
     if ($code -ne 0) {
@@ -148,10 +209,13 @@ function Invoke-Job($job) {
       return
     }
     $files = @{ report = $report }
-    if ($fix) { $files.fixed = $out }
+    if ($fix -or $tool) { $files.fixed = $out }
+    $pngs = @(Get-Previews $(if ($fix -or $tool) { $out } else { $in }) $dir)
     $i = 0
-    foreach ($p in (Get-Previews $(if ($fix) { $out } else { $in }) $dir)) { $i++; $files["preview$i"] = $p.FullName }
-    Send-Result $job.id 'ok' '' $files
+    foreach ($p in ($pngs | Select-Object -First ([int]$cfg.maxPreviews))) { $i++; $files["preview$i"] = $p.FullName }
+    $fields = @{}
+    try { if ($pngs.Count) { $fields.pages = Get-PageColors $pngs } } catch { Write-Log "job $($job.id) page read: $($_.Exception.Message)" }
+    Send-Result $job.id 'ok' '' $files $fields
     Write-Log "job $($job.id) $($job.mode) done, $i previews"
   } catch {
     Write-Log "job $($job.id) error: $($_.Exception.Message)"
