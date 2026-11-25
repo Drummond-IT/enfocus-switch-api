@@ -19,11 +19,15 @@
 #   fetches this script from the portal (GET /api/pitstop/helper-script, same secret), keeps the old copy as
 #   PitStopHelper.ps1.before-update and restarts the task. Undo: copy that file back and restart the task.
 # Config: C:\ProgramData\DrummondPitStopHelper\config.json (written by Install-PitStopHelper.ps1).
+# InDesign: with -InDesign the script runs as the InDesign exporter (D320 c, F-1504): in a signed-in session (desktop
+#   InDesign can't run as SYSTEM), it takes only "indd" jobs (GET next?only=indd), opens the InDesign file from the
+#   package with desktop InDesign, exports PDF/X-4 (config "indesignPreset", default [PDF/X-4:2008]) and checks it.
 
 param(
   [string]$ConfigPath = "$env:ProgramData\DrummondPitStopHelper\config.json",
   [switch]$Once,
-  [switch]$SelfUpdate
+  [switch]$SelfUpdate,
+  [switch]$InDesign
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,8 +36,9 @@ Add-Type -AssemblyName System.Net.Http
 
 $cfg = Get-Content -Raw $ConfigPath | ConvertFrom-Json
 $root = Split-Path $ConfigPath
-$work = Join-Path $root 'work'
-$log = Join-Path $root 'helper.log'
+$work = Join-Path $root $(if ($InDesign) { 'work-indesign' } else { 'work' })
+$log = Join-Path $root $(if ($InDesign) { 'indesign.log' } else { 'helper.log' })
+$inddProgId = if ($cfg.indesignProgId) { $cfg.indesignProgId } else { 'InDesign.Application' }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 function Write-Log($msg) {
@@ -57,6 +62,9 @@ $client.DefaultRequestHeaders.UserAgent.ParseAdd('DrummondPitStopHelper/2')
 $toolNames = @(if ($cfg.tools) { $cfg.tools.PSObject.Properties | ForEach-Object { $_.Name } })
 # F-1505: EPS and PostScript to PDF with Ghostscript (config "ghostscript", the path to gswin64c.exe), as tool "topdf".
 if ($cfg.ghostscript -and (Test-Path $cfg.ghostscript)) { $toolNames += 'topdf' }
+# The InDesign exporter offers only "indd", and only when desktop InDesign is installed.
+if ($InDesign) { $toolNames = @(if ([type]::GetTypeFromProgID($inddProgId)) { 'indd' }) }
+$client.DefaultRequestHeaders.Add('X-Helper-Name', $(if ($InDesign) { 'indesign' } else { 'pitstop' }))
 $toolNames = $toolNames -join ','
 if ($toolNames) { $client.DefaultRequestHeaders.Add('X-Helper-Tools', $toolNames) }
 $portal = $cfg.portalUrl.TrimEnd('/')
@@ -68,13 +76,54 @@ if ($SelfUpdate) {
   Copy-Item -Force $me "$me.before-update"
   [IO.File]::WriteAllText($me, $new, (New-Object Text.UTF8Encoding $false))
   Write-Log "helper updated from the portal ($($new.Length) characters); restarting the task"
-  Stop-ScheduledTask -TaskName 'Drummond PitStop helper' -ErrorAction SilentlyContinue
-  Start-ScheduledTask -TaskName 'Drummond PitStop helper'
+  foreach ($t in 'Drummond PitStop helper', 'Drummond InDesign export') {
+    if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName $t }
+  }
   "Updated. The old copy is $me.before-update"
   return
 }
 
 function Esc([string]$s) { [Security.SecurityElement]::Escape($s) }
+
+# D320 c: a raw InDesign file (alone, or the package zip it came in) to PDF/X-4 with desktop InDesign.
+# Returns '' when $pdfOut is written, else a sentence for the customer. Links and fonts must all be in the package.
+function Export-InDesign($src, $dir, $name, $pdfOut) {
+  $pkg = Join-Path $dir 'pkg'
+  New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+  $b = [IO.File]::ReadAllBytes($src)
+  if ($b.Length -gt 3 -and $b[0] -eq 0x50 -and $b[1] -eq 0x4B) {
+    $zipPath = Join-Path $dir 'package.zip'
+    Move-Item -Force $src $zipPath
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $pkg -Force
+  } else {
+    Move-Item -Force $src (Join-Path $pkg ([IO.Path]::GetFileNameWithoutExtension($name) + '.indd'))
+  }
+  $want = [IO.Path]::GetFileNameWithoutExtension($name)
+  $docs = @(Get-ChildItem -LiteralPath $pkg -Recurse -Filter '*.indd' | Where-Object { $_.FullName -notmatch '\\Links\\' -and $_.Name -notlike '._*' -and $_.FullName -notmatch '__MACOSX' })
+  $doc = $docs | Where-Object { $_.BaseName -eq $want } | Select-Object -First 1
+  if (-not $doc) { $doc = $docs | Select-Object -First 1 }
+  if (-not $doc) { return 'There is no InDesign file in the package.' }
+  $app = New-Object -ComObject $inddProgId
+  $app.ScriptPreferences.UserInteractionLevel = 1699640946   # never interact
+  $d = $app.Open($doc.FullName, $false)
+  try {
+    $bad = @()
+    for ($n = 1; $n -le $d.Links.Count; $n++) {
+      $l = $d.Links.Item($n)
+      if ($l.Status -eq 1819109747) { $bad += $l.Name }            # missing
+      elseif ($l.Status -eq 1819242340) { [void]$l.Update() }      # out of date (times changed by the zip): read the file again
+    }
+    for ($n = 1; $n -le $d.Fonts.Count; $n++) {
+      $f = $d.Fonts.Item($n)
+      if ($f.Status -ne 1718831470) { $bad += $f.Name }            # not installed or substituted
+    }
+    if ($bad.Count) { return "We couldn't make the PDF: these aren't in the package: $((($bad | Select-Object -First 15) -join ', '))." }
+    $presetName = if ($cfg.indesignPreset) { $cfg.indesignPreset } else { '[PDF/X-4:2008]' }
+    $d.Export(1952403524, $pdfOut, $false, $app.PDFExportPresets.Item($presetName))   # PDF
+  } finally { $d.Close(1852776480) }                                # don't save
+  if (-not (Test-Path $pdfOut)) { return "We couldn't make the PDF from $($doc.Name)." }
+  return ''
+}
 
 # One CLI run: a config XML with the mutators in order (action list first, then the preflight profile), the JSON
 # report, and the output PDF for fix jobs. Returns the CLI exit code; preflight findings never make it nonzero.
@@ -192,7 +241,12 @@ function Invoke-Job($job) {
     $out = if ($fix -or $tool) { Join-Path $dir 'fixed.pdf' } else { $null }
     $mutators = @()
     if ($fix) { $mutators += $cfg.actionList }
-    if ($tool -and $job.tool -eq 'topdf') {
+    if ($tool -and $job.tool -eq 'indd') {
+      $src = Join-Path $dir 'input.src'
+      Move-Item -Force $in $src
+      $why = Export-InDesign $src $dir $job.name $in
+      if ($why) { Send-Result $job.id 'error' $why @{}; Write-Log "job $($job.id) indesign: $why"; return }
+    } elseif ($tool -and $job.tool -eq 'topdf') {
       # F-1505: the file is EPS or PostScript: Ghostscript makes the PDF, which is then checked like any PDF.
       $src = Join-Path $dir 'input.src'
       Move-Item -Force $in $src
@@ -242,7 +296,7 @@ function Invoke-Job($job) {
 Write-Log "helper started, portal $portal"
 do {
   try {
-    $r = $client.GetAsync("$portal/api/pitstop/next").Result
+    $r = $client.GetAsync("$portal/api/pitstop/next$(if ($InDesign) { '?only=indd' })").Result
     if ([int]$r.StatusCode -eq 200) {
       $job = $r.Content.ReadAsStringAsync().Result | ConvertFrom-Json
       Invoke-Job $job

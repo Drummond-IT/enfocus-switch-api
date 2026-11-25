@@ -60,8 +60,17 @@ The portal's file tools that need PitStop (print-ready PDF/X-4, grayscale, one c
 EPS and PostScript files become PDFs with Ghostscript (F-1505) when `config.json` has `"ghostscript"`, the path to
 `gswin64c.exe` (already on switch03). Ghostscript runs with `-dSAFER`. The helper then reports tool `topdf`.
 
-The portal offers a tool only after the helper reports it. New action lists are copies kept in the helper's own
-`tools` folder; the existing PitStop resources are never changed.
+The portal offers a tool only after the helper reports it. The lists are PitStop Server's stock lists, named by path
+(read only), or new lists kept in the helper's own `tools` folder; existing PitStop resources are never changed.
+
+## InDesign exporter (D320 c, F-1504)
+
+A raw InDesign file with no PDF is made into PDF/X-4 by desktop InDesign on switch03 (Drummond allocates a dedicated
+Creative Cloud license to each server). InDesign can't run as SYSTEM, so the same script runs a second time with
+`-InDesign` in the signed-in session, as the scheduled task "Drummond InDesign export" (at logon, that user, only when
+signed in). It takes only InDesign jobs, opens the InDesign file from the package (links and fonts from its Links and
+Document fonts folders), stops with a message when any link or font is missing, exports with the preset in
+`"indesignPreset"` (default `[PDF/X-4:2008]`), then checks the PDF with the PitStop profile. Its log is `indesign.log`.
 
 ## Updating the helper
 
