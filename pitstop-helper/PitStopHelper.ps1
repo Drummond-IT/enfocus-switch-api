@@ -85,6 +85,48 @@ if ($SelfUpdate) {
 
 function Esc([string]$s) { [Security.SecurityElement]::Escape($s) }
 
+# Opens a customer zip into $dest, entry by entry. Every entry must land under $dest: no absolute paths, drive
+# letters, colons or '..' parts. Caps the entry count and the bytes written, counted as they are written.
+# Returns '' when done, else a sentence for the customer.
+function Expand-Package($zipPath, $dest) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $root = [IO.Path]::GetFullPath($dest).TrimEnd('\') + '\'
+  $maxEntries = 5000
+  $maxBytes = 4GB
+  $z = [IO.Compression.ZipFile]::OpenRead($zipPath)
+  try {
+    if ($z.Entries.Count -gt $maxEntries) { return 'The package has too many files to open.' }
+    $total = [long]0
+    $buf = New-Object byte[] 65536
+    foreach ($e in $z.Entries) {
+      $n = $e.FullName
+      if (-not $n -or $n -match '^[\\/]' -or $n -match ':' -or $n -match '(^|[\\/])\.\.([\\/]|$)') { return 'The package has a file name we can''t open.' }
+      $to = [IO.Path]::GetFullPath([IO.Path]::Combine($root, $n.Replace('/', '\')))
+      if (-not $to.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return 'The package has a file name we can''t open.' }
+      if ($n.EndsWith('/') -or $n.EndsWith('\')) { New-Item -ItemType Directory -Force -Path $to | Out-Null; continue }
+      New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($to)) | Out-Null
+      $in = $e.Open()
+      $out = [IO.File]::Open($to, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+      try {
+        while (($r = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+          $total += $r
+          if ($total -gt $maxBytes) { return 'The package is too large to open.' }
+          $out.Write($buf, 0, $r)
+        }
+      } finally { $out.Dispose(); $in.Dispose() }
+    }
+  } finally { $z.Dispose() }
+  return ''
+}
+
+# True when an InDesign link points at a file inside $root. UNC paths and URLs never count.
+function Test-InPackage([string]$path, [string]$root) {
+  if (-not $path -or $path.StartsWith('\\') -or $path.StartsWith('//') -or $path -match '^[A-Za-z][A-Za-z0-9+.-]+://') { return $false }
+  try { $full = [IO.Path]::GetFullPath($path) } catch { return $false }
+  $r = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+  return $full.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)
+}
+
 # D320 c: a raw InDesign file (alone, or the package zip it came in) to PDF/X-4 with desktop InDesign.
 # Returns '' when $pdfOut is written, else a sentence for the customer. Links and fonts must all be in the package.
 function Export-InDesign($src, $dir, $name, $pdfOut) {
@@ -94,7 +136,8 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
   if ($b.Length -gt 3 -and $b[0] -eq 0x50 -and $b[1] -eq 0x4B) {
     $zipPath = Join-Path $dir 'package.zip'
     Move-Item -Force $src $zipPath
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $pkg -Force
+    $why = Expand-Package $zipPath $pkg
+    if ($why) { return $why }
   } else {
     Move-Item -Force $src (Join-Path $pkg ([IO.Path]::GetFileNameWithoutExtension($name) + '.indd'))
   }
@@ -110,7 +153,8 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
     $bad = @()
     for ($n = 1; $n -le $d.Links.Count; $n++) {
       $l = $d.Links.Item($n)
-      if ($l.Status -eq 1819109747) { $bad += $l.Name }            # missing
+      if (-not (Test-InPackage $l.FilePath $pkg)) { $bad += $l.Name }   # outside the package, a network path or a URL: never read
+      elseif ($l.Status -eq 1819109747) { $bad += $l.Name }        # missing
       elseif ($l.Status -eq 1819242340) { [void]$l.Update() }      # out of date (times changed by the zip): read the file again
     }
     for ($n = 1; $n -le $d.Fonts.Count; $n++) {
