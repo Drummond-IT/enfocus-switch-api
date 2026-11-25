@@ -127,6 +127,19 @@ function Test-InPackage([string]$path, [string]$root) {
   return $full.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)
 }
 
+# Before InDesign opens a document: the link paths in its XMP manifest. False when any is a network path (UNC, or a
+# file: URL with a host) or a non-file URL, so InDesign never reaches out for it while opening.
+function Test-InddLinksLocal([string]$path) {
+  $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($path))
+  $vals = [regex]::Matches($text, '<stRef:(?:filePath|lastURL)>([^<]{1,4096})</stRef:|stRef:(?:filePath|lastURL)="([^"]{1,4096})"')
+  foreach ($m in $vals) {
+    $v = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+    try { $v = [Uri]::UnescapeDataString($v.Trim()) } catch { }
+    if ($v.StartsWith('\\') -or $v.StartsWith('//') -or $v -match '^file://[^/]' -or ($v -match '^[A-Za-z][A-Za-z0-9+.-]+://' -and $v -notmatch '^file:')) { return $false }
+  }
+  return $true
+}
+
 # D320 c: a raw InDesign file (alone, or the package zip it came in) to PDF/X-4 with desktop InDesign.
 # Returns '' when $pdfOut is written, else a sentence for the customer. Links and fonts must all be in the package.
 function Export-InDesign($src, $dir, $name, $pdfOut) {
@@ -146,9 +159,12 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
   $doc = $docs | Where-Object { $_.BaseName -eq $want } | Select-Object -First 1
   if (-not $doc) { $doc = $docs | Select-Object -First 1 }
   if (-not $doc) { return 'There is no InDesign file in the package.' }
+  if (-not (Test-InddLinksLocal $doc.FullName)) { return "We couldn't make the PDF: $($doc.Name) links to files on a network or the web. Package it with its links and send it again." }
   $app = New-Object -ComObject $inddProgId
   $app.ScriptPreferences.UserInteractionLevel = 1699640946   # never interact
-  $d = $app.Open($doc.FullName, $false)
+  $checkAtOpen = $app.LinkingPreferences.CheckLinksAtOpen
+  $app.LinkingPreferences.CheckLinksAtOpen = $false          # don't look links up while opening; the loop below checks paths first
+  try { $d = $app.Open($doc.FullName, $false) } catch { $app.LinkingPreferences.CheckLinksAtOpen = $checkAtOpen; throw }
   try {
     $bad = @()
     for ($n = 1; $n -le $d.Links.Count; $n++) {
@@ -164,7 +180,7 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
     if ($bad.Count) { return "We couldn't make the PDF: these aren't in the package: $((($bad | Select-Object -First 15) -join ', '))." }
     $presetName = if ($cfg.indesignPreset) { $cfg.indesignPreset } else { '[PDF/X-4:2008]' }
     $d.Export(1952403524, $pdfOut, $false, $app.PDFExportPresets.Item($presetName))   # PDF
-  } finally { $d.Close(1852776480) }                                # don't save
+  } finally { $d.Close(1852776480); $app.LinkingPreferences.CheckLinksAtOpen = $checkAtOpen }   # don't save
   if (-not (Test-Path $pdfOut)) { return "We couldn't make the PDF from $($doc.Name)." }
   return ''
 }
