@@ -57,6 +57,9 @@ The portal's file tools that need PitStop (print-ready PDF/X-4, grayscale, one c
 }
 ```
 
+EPS and PostScript files become PDFs with Ghostscript (F-1505) when `config.json` has `"ghostscript"`, the path to
+`gswin64c.exe` (already on switch03). Ghostscript runs with `-dSAFER`. The helper then reports tool `topdf`.
+
 The portal offers a tool only after the helper reports it. New action lists are copies kept in the helper's own
 `tools` folder; the existing PitStop resources are never changed.
 

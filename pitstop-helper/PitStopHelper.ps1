@@ -54,7 +54,10 @@ $client.Timeout = [TimeSpan]::FromMinutes(10)
 $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', (Get-Secret))
 $client.DefaultRequestHeaders.UserAgent.ParseAdd('DrummondPitStopHelper/2')
 # The PitStop tools set up here (config "tools"), named on every poll so the portal offers only those (F-1494, F-1499).
-$toolNames = if ($cfg.tools) { ($cfg.tools.PSObject.Properties | ForEach-Object { $_.Name }) -join ',' } else { '' }
+$toolNames = @(if ($cfg.tools) { $cfg.tools.PSObject.Properties | ForEach-Object { $_.Name } })
+# F-1505: EPS and PostScript to PDF with Ghostscript (config "ghostscript", the path to gswin64c.exe), as tool "topdf".
+if ($cfg.ghostscript -and (Test-Path $cfg.ghostscript)) { $toolNames += 'topdf' }
+$toolNames = $toolNames -join ','
 if ($toolNames) { $client.DefaultRequestHeaders.Add('X-Helper-Tools', $toolNames) }
 $portal = $cfg.portalUrl.TrimEnd('/')
 
@@ -189,13 +192,23 @@ function Invoke-Job($job) {
     $out = if ($fix -or $tool) { Join-Path $dir 'fixed.pdf' } else { $null }
     $mutators = @()
     if ($fix) { $mutators += $cfg.actionList }
-    if ($tool) {
+    if ($tool -and $job.tool -eq 'topdf') {
+      # F-1505: the file is EPS or PostScript: Ghostscript makes the PDF, which is then checked like any PDF.
+      $src = Join-Path $dir 'input.src'
+      Move-Item -Force $in $src
+      $gs = Start-Process -FilePath $cfg.ghostscript -ArgumentList @('-dSAFER', '-dBATCH', '-dNOPAUSE', '-dQUIET', '-sDEVICE=pdfwrite', '-dEPSCrop', '-dPDFSETTINGS=/prepress', "-sOutputFile=`"$in`"", "`"$src`"") -NoNewWindow -Wait -PassThru -RedirectStandardError (Join-Path $dir 'gs-stderr.txt')
+      if ($gs.ExitCode -ne 0 -or -not (Test-Path $in)) {
+        Send-Result $job.id 'error' "We couldn't turn this file into a PDF ($($gs.ExitCode))." @{}
+        Write-Log "job $($job.id) ghostscript failed: $($gs.ExitCode)"
+        return
+      }
+    } elseif ($tool) {
       # The tool's action lists (config "tools", one array per tool name). A tool that isn't set up here is an error,
       # so the customer is told rather than given an unchanged copy.
       $lists = if ($cfg.tools) { $cfg.tools.($job.tool) } else { $null }
       if (-not $lists) {
-        Send-Result $job.id 'error' "The $($job.tool) tool isn't set up on the PitStop server." @{}
-        Write-Log "job $($job.id) tool $($job.tool) not set up"
+        Send-Result $job.id 'error' "The $($job.tool) tool has no action lists on the PitStop server yet." @{}
+        Write-Log "job $($job.id) tool $($job.tool) has no action lists"
         return
       }
       $mutators += $lists
@@ -208,6 +221,7 @@ function Invoke-Job($job) {
       Write-Log "job $($job.id) failed: $code $err"
       return
     }
+    if ($out -and -not (Test-Path $out)) { Copy-Item $in $out }
     $files = @{ report = $report }
     if ($fix -or $tool) { $files.fixed = $out }
     $pngs = @(Get-Previews $(if ($fix -or $tool) { $out } else { $in }) $dir)
