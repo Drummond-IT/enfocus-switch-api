@@ -19,9 +19,10 @@ same. No port, share, firewall or Switch change is needed.
 
 | Call | What it does |
 |---|---|
-| `GET /api/pitstop/next` | `204` when nothing waits. Otherwise `{ id, name, mode: "check" \| "fix", file }`, where `file` is a download URL |
+| `GET /api/pitstop/next` | `204` when nothing waits. Otherwise `{ id, name, mode: "check" \| "fix" \| "tool", tool?, file }`, where `file` is a download URL. Each poll sends `X-Helper-Tools` (the tools set up in `config.json`) |
+| `GET /api/pitstop/helper-script` | The current helper script, for `-SelfUpdate` |
 | `GET <file>` | The file's bytes |
-| `POST /api/pitstop/result?id=…` | Multipart: `status` (`ok` or `error`), `message`, `report` (JSON), `fixed` (PDF), `preview1..4` (PNG) |
+| `POST /api/pitstop/result?id=…` | Multipart: `status` (`ok` or `error`), `message`, `report` (JSON), `fixed` (PDF), `preview1..4` (PNG), `pages` (one letter per page: `c` color, `k` black only, `w` empty) |
 
 Every call sends `Authorization: Bearer <PITSTOP_HELPER_SECRET>`.
 
@@ -42,6 +43,39 @@ Steps 1 and 2 change nothing. Steps 3 and 4 need Chris's go.
    PitStop Pro on switch03 (specs in `../switch-packages/`), run `-Install` again with their paths.
 
 To undo everything: `-Remove`.
+
+## Client file tools (F-1494, F-1499)
+
+The portal's file tools that need PitStop (print-ready PDF/X-4, grayscale, one color) run action lists named in
+`config.json` under `tools`, for example:
+
+```json
+"tools": {
+  "printready": ["C:\\ProgramData\\DrummondPitStopHelper\\tools\\printready.eal"],
+  "grayscale": ["C:\\ProgramData\\DrummondPitStopHelper\\tools\\grayscale.eal"],
+  "onecolor": ["C:\\ProgramData\\DrummondPitStopHelper\\tools\\onecolor.eal"]
+}
+```
+
+EPS and PostScript files become PDFs with Ghostscript (F-1505) when `config.json` has `"ghostscript"`, the path to
+`gswin64c.exe` (already on switch03). Ghostscript runs with `-dSAFER`. The helper then reports tool `topdf`.
+
+The portal offers a tool only after the helper reports it. The lists are PitStop Server's stock lists, named by path
+(read only), or new lists kept in the helper's own `tools` folder; existing PitStop resources are never changed.
+
+## InDesign exporter (D320 c, F-1504)
+
+A raw InDesign file with no PDF is made into PDF/X-4 by desktop InDesign on switch03 (Drummond allocates a dedicated
+Creative Cloud license to each server). InDesign can't run as SYSTEM, so the same script runs a second time with
+`-InDesign` in the signed-in session, as the scheduled task "Drummond InDesign export" (at logon, that user, only when
+signed in). It takes only InDesign jobs, opens the InDesign file from the package (links and fonts from its Links and
+Document fonts folders), stops with a message when any link or font is missing, exports with the preset in
+`"indesignPreset"` (default `[PDF/X-4:2008]`), then checks the PDF with the PitStop profile. Its log is `indesign.log`.
+
+## Updating the helper
+
+`powershell -ExecutionPolicy Bypass -File .\PitStopHelper.ps1 -SelfUpdate` downloads the script from the portal,
+keeps the old copy as `PitStopHelper.ps1.before-update` and restarts the task.
 
 ## Files on switch03
 
