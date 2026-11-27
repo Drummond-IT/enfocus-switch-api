@@ -160,7 +160,12 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
   if (-not $doc) { $doc = $docs | Select-Object -First 1 }
   if (-not $doc) { return 'There is no InDesign file in the package.' }
   if (-not (Test-InddLinksLocal $doc.FullName)) { return "We couldn't make the PDF: $($doc.Name) links to files on a network or the web. Package it with its links and send it again." }
+  # D327 b: an InDesign someone has open is shared. The document opens without a window, the settings changed here are
+  # put back, and only an InDesign the exporter started itself is quit.
+  $wasOpen = [bool](Get-Process -Name 'InDesign' -ErrorAction SilentlyContinue)
   $app = New-Object -ComObject $inddProgId
+  $interaction = $app.ScriptPreferences.UserInteractionLevel
+  try {
   $app.ScriptPreferences.UserInteractionLevel = 1699640946   # never interact
   $checkAtOpen = $app.LinkingPreferences.CheckLinksAtOpen
   $app.LinkingPreferences.CheckLinksAtOpen = $false          # don't look links up while opening; the loop below checks paths first
@@ -181,6 +186,10 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
     $presetName = if ($cfg.indesignPreset) { $cfg.indesignPreset } else { '[PDF/X-4:2008]' }
     $d.Export(1952403524, $pdfOut, $false, $app.PDFExportPresets.Item($presetName))   # PDF
   } finally { $d.Close(1852776480); $app.LinkingPreferences.CheckLinksAtOpen = $checkAtOpen }   # don't save
+  } finally {
+    try { $app.ScriptPreferences.UserInteractionLevel = $interaction } catch {}
+    try { if (-not $wasOpen -and $app.Documents.Count -eq 0) { $app.Quit(1852776480) } } catch {}   # quit without saving, only our own InDesign with no document open
+  }
   if (-not (Test-Path $pdfOut)) { return "We couldn't make the PDF from $($doc.Name)." }
   return ''
 }
@@ -312,7 +321,7 @@ function Invoke-Job($job) {
       Move-Item -Force $in $src
       $gs = Start-Process -FilePath $cfg.ghostscript -ArgumentList @('-dSAFER', '-dBATCH', '-dNOPAUSE', '-dQUIET', '-sDEVICE=pdfwrite', '-dEPSCrop', '-dPDFSETTINGS=/prepress', "-sOutputFile=`"$in`"", "`"$src`"") -NoNewWindow -Wait -PassThru -RedirectStandardError (Join-Path $dir 'gs-stderr.txt')
       if ($gs.ExitCode -ne 0 -or -not (Test-Path $in)) {
-        Send-Result $job.id 'error' "We couldn't turn this file into a PDF ($($gs.ExitCode))." @{}
+        Send-Result $job.id 'error' "We couldn't turn this file into a PDF. Prepress will take a look." @{}
         Write-Log "job $($job.id) ghostscript failed: $($gs.ExitCode)"
         return
       }
