@@ -9,7 +9,8 @@ The helper runs on switch03 (PitStop Server 26.03). Every 20 seconds it asks the
 HTTPS only. For each file it:
 
 1. Downloads it.
-2. Runs `PitStopServerCLI.exe` on it with the preflight profile. A fix job runs the action list first, then the profile.
+2. Runs `PitStopServerCLI.exe` on it with the preflight profile. A fix job runs the action list first, then the profile. When the portal names PitStop Server's own
+   action lists for the job (`fixes`, F-1552), those run instead, found by name in PitStop Server's library.
 3. Posts back three things: PitStop's JSON report, the fixed PDF (fix jobs only) and PNG previews of the first pages.
 
 The portal already reads the JSON report with `summariseReport()` in `src/switch.js`, so the customer screens stay the
@@ -75,6 +76,13 @@ Document fonts folders), stops with a message when any link or font is missing, 
 The task runs at the normal (not elevated) level, so it can use the InDesign someone has open (D327 b). It opens the
 customer's document without a window, never touches other open documents, puts back the settings it changes, closes
 its document without saving, and quits only an InDesign it started itself, once no document is open.
+
+## Standard fixes (F-1552, F-1553)
+With `AUTOFIX_LISTS_ENABLED` on in the portal, a fix job carries `fixes`: names of PitStop Server's own action lists, in
+order, picked from what the original's check found. The helper indexes `*.eal` files under config `stockActionLists`
+(default `C:\Program Files\Enfocus\Enfocus PitStop Server 26\Resources\Action Lists`) by file name, runs those it
+finds, logs any it can't, and posts the names it ran as `applied` (joined by `|`). With none found, config `actionList`
+runs as before. Nothing in PitStop Server's library or Switch's flows is changed.
 
 ## Updating the helper
 
