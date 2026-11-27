@@ -296,6 +296,21 @@ function Send-Result($id, $status, $message, $files, $fields = @{}) {
   if (-not $r.IsSuccessStatusCode) { throw "result for $id not accepted ($([int]$r.StatusCode))" }
 }
 
+# F-1552: a fix job may name PitStop Server's own action lists to run ("fixes", in order). Each is found by file name in
+# PitStop Server's library (config "stockActionLists", default the PitStop Server 26 English library); a name that
+# isn't there is skipped and logged. With none found, the config "actionList" runs as before.
+$stockRoot = if ($cfg.stockActionLists) { $cfg.stockActionLists } else { 'C:\Program Files\Enfocus\Enfocus PitStop Server 26\Resources\Action Lists' }
+$script:stockIndex = $null
+function Find-StockLists([string[]]$names) {
+  if ($null -eq $script:stockIndex) {
+    $script:stockIndex = @{}
+    if (Test-Path $stockRoot) { Get-ChildItem -Path $stockRoot -Recurse -File -Filter '*.eal' -ErrorAction SilentlyContinue | ForEach-Object { if (-not $script:stockIndex.ContainsKey($_.BaseName)) { $script:stockIndex[$_.BaseName] = $_.FullName } } }
+  }
+  $found = @()
+  foreach ($n in $names) { if ($script:stockIndex.ContainsKey($n)) { $found += [pscustomobject]@{ name = $n; path = $script:stockIndex[$n] } } else { Write-Log "fix list not found: $n" } }
+  $found
+}
+
 function Invoke-Job($job) {
   $dir = Join-Path $work ($job.id -replace '[^\w.-]', '_')
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -309,7 +324,9 @@ function Invoke-Job($job) {
     $tool = $job.mode -eq 'tool'
     $out = if ($fix -or $tool) { Join-Path $dir 'fixed.pdf' } else { $null }
     $mutators = @()
-    if ($fix) { $mutators += $cfg.actionList }
+    $applied = @()
+    if ($fix -and $job.fixes) { $applied = @(Find-StockLists @($job.fixes)) }
+    if ($fix) { if ($applied.Count) { $mutators += @($applied | ForEach-Object { $_.path }) } else { $mutators += $cfg.actionList } }
     if ($tool -and $job.tool -eq 'indd') {
       $src = Join-Path $dir 'input.src'
       Move-Item -Force $in $src
@@ -351,6 +368,7 @@ function Invoke-Job($job) {
     $i = 0
     foreach ($p in ($pngs | Select-Object -First ([int]$cfg.maxPreviews))) { $i++; $files["preview$i"] = $p.FullName }
     $fields = @{}
+    if ($applied.Count) { $fields.applied = (@($applied | ForEach-Object { $_.name }) -join '|') }
     try { if ($pngs.Count) { $fields.pages = Get-PageColors $pngs } } catch { Write-Log "job $($job.id) page read: $($_.Exception.Message)" }
     Send-Result $job.id 'ok' '' $files $fields
     Write-Log "job $($job.id) $($job.mode) done, $i previews"
