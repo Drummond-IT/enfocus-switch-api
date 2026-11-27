@@ -18,6 +18,10 @@
 # Update: powershell -ExecutionPolicy Bypass -File C:\ProgramData\DrummondPitStopHelper\PitStopHelper.ps1 -SelfUpdate
 #   fetches this script from the portal (GET /api/pitstop/helper-script, same secret), keeps the old copy as
 #   PitStopHelper.ps1.before-update and restarts the task. Undo: copy that file back and restart the task.
+# Auto-update (F-1561): every poll answer carries X-Helper-Script, the SHA-256 of the script the portal serves. When it
+#   differs from this file, the helper fetches the script, checks its hash, keeps the old copy as .before-update and
+#   runs the new copy in its place, so a merge reaches switch03 with no one at the keyboard. Config "autoUpdate": false
+#   turns it off. X-Helper-Exporter: on (D327 b) has the PitStop helper enable the "Drummond InDesign export" task.
 # Config: C:\ProgramData\DrummondPitStopHelper\config.json (written by Install-PitStopHelper.ps1).
 # InDesign: with -InDesign the script runs as the InDesign exporter (D320 c, F-1504): in a signed-in session (desktop
 #   InDesign can't run as SYSTEM), it takes only "indd" jobs (GET next?only=indd), opens the InDesign file from the
@@ -68,6 +72,37 @@ $client.DefaultRequestHeaders.Add('X-Helper-Name', $(if ($InDesign) { 'indesign'
 $toolNames = $toolNames -join ','
 if ($toolNames) { $client.DefaultRequestHeaders.Add('X-Helper-Tools', $toolNames) }
 $portal = $cfg.portalUrl.TrimEnd('/')
+
+$selfBytes = [IO.File]::ReadAllBytes($PSCommandPath)
+$selfHash = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($selfBytes) | ForEach-Object { $_.ToString('x2') })
+$script:updateRetryAt = [datetime]::MinValue
+
+# F-1561: replace this file with the portal's copy when the hashes differ, then run the new copy in this process's place.
+function Update-FromPortal([string]$want) {
+  if ($cfg.autoUpdate -eq $false -or $want -notmatch '^[0-9a-f]{64}$' -or $want -eq $selfHash -or (Get-Date) -lt $script:updateRetryAt) { return }
+  $script:updateRetryAt = (Get-Date).AddHours(1)
+  $bytes = $client.GetByteArrayAsync("$portal/api/pitstop/helper-script").Result
+  $got = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+  $text = [Text.Encoding]::UTF8.GetString($bytes)
+  if ($got -ne $want -or $bytes.Length -lt 2000 -or $text -notmatch '# PitStop helper for Drummond One') { Write-Log 'auto-update skipped: the portal copy did not check out; trying again in an hour'; return }
+  $me = $PSCommandPath
+  try { Copy-Item -Force $me "$me.before-update"; [IO.File]::WriteAllBytes($me, $bytes) } catch { if ([IO.File]::ReadAllBytes($me).Length -ne $bytes.Length) { Write-Log "auto-update could not write the script: $($_.Exception.Message)"; return } }
+  Write-Log "auto-update: script $($selfHash.Substring(0,8)) -> $($got.Substring(0,8)); running the new copy"
+  $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $me, '-ConfigPath', $ConfigPath)
+  if ($InDesign) { $a += '-InDesign' }
+  & powershell.exe @a
+  exit $LASTEXITCODE
+}
+
+# D327 b: the portal asks the PitStop helper (SYSTEM) to turn on the InDesign exporter task once it is set up here.
+function Enable-Exporter([string]$want) {
+  if ($InDesign -or $want -ne 'on' -or $script:exporterDone) { return }
+  $script:exporterDone = $true
+  $t = Get-ScheduledTask -TaskName 'Drummond InDesign export' -ErrorAction SilentlyContinue
+  if ($t -and $t.State -eq 'Disabled') { Enable-ScheduledTask -TaskName 'Drummond InDesign export' | Out-Null; Write-Log 'InDesign exporter task enabled (D327 b)' }
+}
+
+function Read-Header($r, [string]$n) { $v = $null; if ($r.Headers.TryGetValues($n, [ref]$v)) { return @($v)[0] }; return '' }
 
 if ($SelfUpdate) {
   $new = $client.GetStringAsync("$portal/api/pitstop/helper-script").Result
@@ -384,6 +419,8 @@ Write-Log "helper started, portal $portal"
 do {
   try {
     $r = $client.GetAsync("$portal/api/pitstop/next$(if ($InDesign) { '?only=indd' })").Result
+    try { Enable-Exporter (Read-Header $r 'X-Helper-Exporter') } catch { Write-Log "exporter enable error: $($_.Exception.Message)" }
+    if ([int]$r.StatusCode -eq 204) { try { Update-FromPortal (Read-Header $r 'X-Helper-Script') } catch { Write-Log "auto-update error: $($_.Exception.Message)" } }
     if ([int]$r.StatusCode -eq 200) {
       $job = $r.Content.ReadAsStringAsync().Result | ConvertFrom-Json
       Invoke-Job $job
