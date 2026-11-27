@@ -72,9 +72,9 @@ signed in). It takes only InDesign jobs, opens the InDesign file from the packag
 Document fonts folders), stops with a message when any link or font is missing, exports with the preset in
 `"indesignPreset"` (default `[PDF/X-4:2008]`), then checks the PDF with the PitStop profile. Its log is `indesign.log`.
 
-The task runs at the normal (not elevated) level, so it can't block or be blocked by an InDesign someone starts. It
-never shares an open InDesign: while InDesign is open on the machine it asks the portal for no work, and it quits the
-InDesign it started once no document is open. Work it doesn't take goes to prepress after two hours.
+The task runs at the normal (not elevated) level, so it can use the InDesign someone has open (D327 b). It opens the
+customer's document without a window, never touches other open documents, puts back the settings it changes, closes
+its document without saving, and quits only an InDesign it started itself, once no document is open.
 
 ## Updating the helper
 

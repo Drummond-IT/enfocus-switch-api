@@ -160,8 +160,11 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
   if (-not $doc) { $doc = $docs | Select-Object -First 1 }
   if (-not $doc) { return 'There is no InDesign file in the package.' }
   if (-not (Test-InddLinksLocal $doc.FullName)) { return "We couldn't make the PDF: $($doc.Name) links to files on a network or the web. Package it with its links and send it again." }
-  # The poll loop takes a job only when InDesign isn't open, so this instance is the exporter's own: it quits after.
+  # D327 b: an InDesign someone has open is shared. The document opens without a window, the settings changed here are
+  # put back, and only an InDesign the exporter started itself is quit.
+  $wasOpen = [bool](Get-Process -Name 'InDesign' -ErrorAction SilentlyContinue)
   $app = New-Object -ComObject $inddProgId
+  $interaction = $app.ScriptPreferences.UserInteractionLevel
   try {
   $app.ScriptPreferences.UserInteractionLevel = 1699640946   # never interact
   $checkAtOpen = $app.LinkingPreferences.CheckLinksAtOpen
@@ -183,7 +186,10 @@ function Export-InDesign($src, $dir, $name, $pdfOut) {
     $presetName = if ($cfg.indesignPreset) { $cfg.indesignPreset } else { '[PDF/X-4:2008]' }
     $d.Export(1952403524, $pdfOut, $false, $app.PDFExportPresets.Item($presetName))   # PDF
   } finally { $d.Close(1852776480); $app.LinkingPreferences.CheckLinksAtOpen = $checkAtOpen }   # don't save
-  } finally { try { if ($app.Documents.Count -eq 0) { $app.Quit(1852776480) } } catch {} }   # quit only with no document open (someone may have started InDesign meanwhile)
+  } finally {
+    try { $app.ScriptPreferences.UserInteractionLevel = $interaction } catch {}
+    try { if (-not $wasOpen -and $app.Documents.Count -eq 0) { $app.Quit(1852776480) } } catch {}   # quit without saving, only our own InDesign with no document open
+  }
   if (-not (Test-Path $pdfOut)) { return "We couldn't make the PDF from $($doc.Name)." }
   return ''
 }
@@ -358,14 +364,6 @@ function Invoke-Job($job) {
 
 Write-Log "helper started, portal $portal"
 do {
-  # The InDesign exporter never shares an InDesign someone has open on this machine: it waits (asks for no work)
-  # until InDesign is closed. Work left waiting goes to prepress after two hours (portal tidyQueue).
-  if ($InDesign -and (Get-Process -Name 'InDesign' -ErrorAction SilentlyContinue)) {
-    if (-not $waiting) { Write-Log 'InDesign is open on this machine; waiting until it is closed'; $waiting = $true }
-    if (-not $Once) { Start-Sleep -Seconds ([int]$cfg.pollSeconds) }
-    continue
-  }
-  if ($waiting) { Write-Log 'InDesign is closed; taking work again'; $waiting = $false }
   try {
     $r = $client.GetAsync("$portal/api/pitstop/next$(if ($InDesign) { '?only=indd' })").Result
     if ([int]$r.StatusCode -eq 200) {
